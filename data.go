@@ -278,6 +278,16 @@ func resolveBaseURL(data AppData, req Request) string {
 
 // ── Workflow data helpers ─────────────────────────────────────────────────────
 
+// deleteBatch removes the batch with the given ID.
+func deleteBatch(data *AppData, batchID string) {
+	for i, b := range data.Batches {
+		if b.ID == batchID {
+			data.Batches = append(data.Batches[:i], data.Batches[i+1:]...)
+			return
+		}
+	}
+}
+
 // addWorkflowStep appends a step to the workflow with the given ID.
 // Returns true if the workflow was found, false otherwise.
 func addWorkflowStep(data *AppData, workflowID string, step WorkflowStep) bool {

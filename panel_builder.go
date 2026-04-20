@@ -75,7 +75,8 @@ func NewBuilderPanel(width, height int, data AppData) BuilderPanel {
 	u := textinput.New()
 	u.Placeholder = "https://api.example.com/endpoint"
 	u.CharLimit = 2048
-	u.Focus()
+	// Do NOT call u.Focus() here — the URL field is only active when
+	// the user explicitly presses Enter to enter edit mode.
 
 	b := textarea.New()
 	b.Placeholder = `{"key": "value"}`
@@ -105,7 +106,7 @@ func (bp *BuilderPanel) LoadRequest(req Request) {
 	bp.tests = req.Tests
 	bp.innerFocus = BuilderFocusURL
 	bp.bodyInput.Blur()
-	bp.urlInput.Focus()
+	bp.urlInput.Blur() // only active once user presses Enter to edit
 
 	// Set method index
 	bp.methodIdx = 0

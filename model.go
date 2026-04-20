@@ -464,10 +464,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key_matches(msg, m.keys.Up) || key_matches(msg, m.keys.Down):
 			cmds = append(cmds, m.routeKeyToPanel(msg))
 
-		// Left / Right — workflow panel switching; other directional uses
+		// Left / Right — cycle method on Request tab; switch workflow panels elsewhere
 		case key_matches(msg, m.keys.Left) || key_matches(msg, m.keys.Right):
 			if m.focus == PanelBuilder {
-				cmds = append(cmds, m.routeKeyToPanel(msg))
+				if m.builder.activeTab == BuilderTabRequest {
+					// Cycle HTTP method backwards or forwards
+					if key_matches(msg, m.keys.Left) {
+						m.builder.methodIdx = (m.builder.methodIdx - 1 + len(httpMethods)) % len(httpMethods)
+					} else {
+						m.builder.methodIdx = (m.builder.methodIdx + 1) % len(httpMethods)
+					}
+				} else {
+					cmds = append(cmds, m.routeKeyToPanel(msg))
+				}
 			}
 
 		// Enter — confirm / activate
@@ -534,13 +543,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch m.builder.activeTab {
 				case BuilderTabWorkflows:
 					if m.builder.workflowScreen.focusList {
-						// Delete the selected workflow
 						cmds = append(cmds, m.deleteSelectedWorkflow())
 					} else {
-						// Delete the selected step
 						cmds = append(cmds, m.deleteSelectedWorkflowStep())
 					}
+				case BuilderTabBatch:
+					cmds = append(cmds, m.deleteSelectedBatch())
 				default:
+					// Headers, Variables, Tests — handled in builder.Update
 					cmds = append(cmds, m.routeKeyToPanel(msg))
 				}
 			}
@@ -549,10 +559,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key_matches(msg, m.keys.OpenConfig):
 			cmds = append(cmds, openConfigCmd())
 
-		// Open request body in editor
+		// Open in editor — context-sensitive
 		case key_matches(msg, m.keys.OpenEditor):
 			if m.focus == PanelBuilder {
-				cmds = append(cmds, openEditorCmd(m.builder.bodyInput.Value(), true, ".json"))
+				if m.builder.activeTab == BuilderTabBatch {
+					// Open the selected batch's source file directly in $EDITOR.
+					// No-op if no batch is selected or source path is empty.
+					if item, ok := m.builder.batchScreen.list.SelectedItem().(batchItem); ok {
+						if item.b.SourcePath != "" {
+							cmds = append(cmds, openFileInEditorCmd(item.b.SourcePath))
+						}
+					}
+				} else {
+					// All other builder tabs: open the request body.
+					cmds = append(cmds, openEditorCmd(m.builder.bodyInput.Value(), true, ".json"))
+				}
 			}
 
 		// Open response body in editor
@@ -565,12 +586,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (these are hardcoded UX shortcuts that don't warrant a config entry)
 		default:
 			switch msg.String() {
-			// m — cycle HTTP method
-			case "m":
-				if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabRequest {
-					m.builder.methodIdx = (m.builder.methodIdx + 1) % len(httpMethods)
-				}
-
 			// N (Shift+N) — add global variable
 			case "N":
 				if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabVariables {
@@ -851,6 +866,19 @@ func (m *Model) openAddWorkflowStepModal() tea.Cmd {
 	)
 	m.modal = &modal
 	return nil
+}
+
+// deleteSelectedBatch deletes the currently highlighted batch config.
+func (m *Model) deleteSelectedBatch() tea.Cmd {
+	item, ok := m.builder.batchScreen.list.SelectedItem().(batchItem)
+	if !ok {
+		return nil
+	}
+	deleteBatch(&m.data, item.b.ID)
+	m.builder.batchScreen = NewBatchScreen(m.data.Batches, m.builder.width, m.builder.height-4)
+	m.builder.batchScreen.SetSize(m.builder.width, m.builder.height-4)
+	m.statusMsg = dimStyle.Render("Batch deleted.")
+	return saveDataCmd(m.data)
 }
 
 // deleteSelectedWorkflow deletes the currently highlighted workflow.
@@ -1209,11 +1237,11 @@ func (m Model) buildHintBar() string {
 			} else if m.editMode && m.builder.innerFocus == BuilderFocusURL {
 				ctx = hint(m.keys.Escape, "exit URL") +
 					hint(m.keys.TabNext, "edit body") +
-					hintKeyStyle.Render("m") + hintStyle.Render(":method  ") +
 					hint(m.keys.OpenEditor, "open in editor")
 			} else {
 				ctx = hint(m.keys.Enter, "edit URL") +
-					hintKeyStyle.Render("m") + hintStyle.Render(":method  ") +
+					hint(m.keys.Left, "prev method") +
+					hint(m.keys.Right, "next method") +
 					hint(m.keys.OpenEditor, "open body in editor")
 			}
 		case BuilderTabHeaders:
@@ -1249,7 +1277,8 @@ func (m Model) buildHintBar() string {
 			ctx = nav +
 				hint(m.keys.SendRequest, "run") +
 				hint(m.keys.NewItem, "new") +
-				hint(m.keys.DeleteItem, "delete")
+				hint(m.keys.DeleteItem, "delete") +
+				hint(m.keys.OpenEditor, "edit source file")
 		}
 
 	case PanelResponse:
@@ -1298,6 +1327,17 @@ func openConfigCmd() tea.Cmd {
 		// Reload config regardless of error — user may have saved a partial edit.
 		cfg, _ := LoadConfig()
 		return configReloadedMsg{cfg: cfg}
+	})
+}
+
+// openFileInEditorCmd opens an existing file at the given path directly in
+// $EDITOR. Unlike openEditorCmd it does not copy to a temp file — the user
+// edits the real file in place. Nothing is read back on close.
+func openFileInEditorCmd(path string) tea.Cmd {
+	return tea.ExecProcess(exec.Command(resolveEditor(), path), func(err error) tea.Msg {
+		// We don't reload anything — the file is the source of truth.
+		// Return an editorClosedMsg with empty content so the handler no-ops.
+		return editorClosedMsg{content: ""}
 	})
 }
 
