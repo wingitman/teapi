@@ -40,6 +40,7 @@ const (
 	ModalAddRequest
 	ModalRenameItem
 	ModalAddWorkflow
+	ModalAddWorkflowStep
 	ModalAddBatch
 	ModalAddTest
 	ModalConfirmDelete

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -273,4 +274,64 @@ func resolveBaseURL(data AppData, req Request) string {
 		}
 	}
 	return url
+}
+
+// ── Workflow data helpers ─────────────────────────────────────────────────────
+
+// addWorkflowStep appends a step to the workflow with the given ID.
+// Returns true if the workflow was found, false otherwise.
+func addWorkflowStep(data *AppData, workflowID string, step WorkflowStep) bool {
+	for i := range data.Workflows {
+		if data.Workflows[i].ID == workflowID {
+			data.Workflows[i].Steps = append(data.Workflows[i].Steps, step)
+			return true
+		}
+	}
+	return false
+}
+
+// deleteWorkflow removes the workflow with the given ID.
+func deleteWorkflow(data *AppData, workflowID string) {
+	for i, wf := range data.Workflows {
+		if wf.ID == workflowID {
+			data.Workflows = append(data.Workflows[:i], data.Workflows[i+1:]...)
+			return
+		}
+	}
+}
+
+// deleteWorkflowStep removes the step at stepIdx from the workflow with workflowID.
+func deleteWorkflowStep(data *AppData, workflowID string, stepIdx int) {
+	for i := range data.Workflows {
+		if data.Workflows[i].ID == workflowID {
+			steps := data.Workflows[i].Steps
+			if stepIdx >= 0 && stepIdx < len(steps) {
+				data.Workflows[i].Steps = append(steps[:stepIdx], steps[stepIdx+1:]...)
+			}
+			return
+		}
+	}
+}
+
+// findRequestByName searches all collections (and sub-groups) for the first
+// request whose Name matches (case-insensitive). Returns nil if not found.
+func findRequestByName(data AppData, name string) *Request {
+	nameLower := strings.ToLower(name)
+	for gi := range data.Collections {
+		for ri := range data.Collections[gi].Requests {
+			if strings.ToLower(data.Collections[gi].Requests[ri].Name) == nameLower {
+				r := data.Collections[gi].Requests[ri]
+				return &r
+			}
+		}
+		for sgi := range data.Collections[gi].Groups {
+			for ri := range data.Collections[gi].Groups[sgi].Requests {
+				if strings.ToLower(data.Collections[gi].Groups[sgi].Requests[ri].Name) == nameLower {
+					r := data.Collections[gi].Groups[sgi].Requests[ri]
+					return &r
+				}
+			}
+		}
+	}
+	return nil
 }

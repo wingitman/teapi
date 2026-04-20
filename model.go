@@ -280,9 +280,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case addWorkflowMsg:
 		wf := Workflow{ID: newID(), Name: msg.name}
 		m.data.Workflows = append(m.data.Workflows, wf)
-		// Rebuild the workflow screen with updated data
-		m.builder.workflowScreen = NewWorkflowScreen(m.data.Workflows, m.builder.width, m.builder.height-4)
+		m.rebuildWorkflowScreen()
 		m.statusMsg = dimStyle.Render("Workflow created.")
+		cmds = append(cmds, saveDataCmd(m.data))
+
+	case addWorkflowStepMsg:
+		// Look up the request by name in the current collections.
+		req := findRequestByName(m.data, msg.requestName)
+		if req == nil {
+			m.statusMsg = errorStyle.Render("Request not found: " + msg.requestName)
+		} else {
+			step := WorkflowStep{RequestID: req.ID, Mode: msg.mode}
+			addWorkflowStep(&m.data, msg.workflowID, step)
+			m.rebuildWorkflowScreen()
+			m.statusMsg = dimStyle.Render("Step added: " + req.Name)
+			cmds = append(cmds, saveDataCmd(m.data))
+		}
+
+	case deleteWorkflowMsg:
+		deleteWorkflow(&m.data, msg.workflowID)
+		m.rebuildWorkflowScreen()
+		m.statusMsg = dimStyle.Render("Workflow deleted.")
+		cmds = append(cmds, saveDataCmd(m.data))
+
+	case deleteWorkflowStepMsg:
+		deleteWorkflowStep(&m.data, msg.workflowID, msg.stepIdx)
+		m.rebuildWorkflowScreen()
+		m.statusMsg = dimStyle.Render("Step removed.")
 		cmds = append(cmds, saveDataCmd(m.data))
 
 	case addBatchMsg:
@@ -494,7 +518,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == PanelSidebar {
 				cmds = append(cmds, m.openNewItemModal())
 			} else if m.focus == PanelBuilder {
-				cmds = append(cmds, m.openNewItemModalForBuilder())
+				if m.builder.activeTab == BuilderTabWorkflows && !m.builder.workflowScreen.focusList {
+					// Steps sub-panel: add a step to the selected workflow
+					cmds = append(cmds, m.openAddWorkflowStepModal())
+				} else {
+					cmds = append(cmds, m.openNewItemModalForBuilder())
+				}
 			}
 
 		// Delete item
@@ -502,7 +531,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.focus == PanelSidebar {
 				cmds = append(cmds, m.openDeleteModal())
 			} else if m.focus == PanelBuilder {
-				cmds = append(cmds, m.routeKeyToPanel(msg))
+				switch m.builder.activeTab {
+				case BuilderTabWorkflows:
+					if m.builder.workflowScreen.focusList {
+						// Delete the selected workflow
+						cmds = append(cmds, m.deleteSelectedWorkflow())
+					} else {
+						// Delete the selected step
+						cmds = append(cmds, m.deleteSelectedWorkflowStep())
+					}
+				default:
+					cmds = append(cmds, m.routeKeyToPanel(msg))
+				}
 			}
 
 		// Open config in editor
@@ -752,6 +792,88 @@ func (m *Model) openEditHeaderModal() tea.Cmd {
 	)
 	m.modal = &modal
 	return nil
+}
+
+// ── Workflow helpers ──────────────────────────────────────────────────────────
+
+// rebuildWorkflowScreen rebuilds the embedded WorkflowScreen from m.data
+// and re-applies the correct size. Call after any change to m.data.Workflows.
+func (m *Model) rebuildWorkflowScreen() {
+	ws := NewWorkflowScreen(m.data.Workflows, m.builder.width, m.builder.height-4)
+	ws.SetSize(m.builder.width, m.builder.height-4)
+	m.builder.workflowScreen = ws
+}
+
+// openAddWorkflowStepModal opens a modal for adding a step to the selected workflow.
+func (m *Model) openAddWorkflowStepModal() tea.Cmd {
+	item, ok := m.builder.workflowScreen.list.SelectedItem().(workflowItem)
+	if !ok {
+		return nil
+	}
+	wfID := item.wf.ID
+
+	// Build a hint listing available request names.
+	var names []string
+	for _, g := range m.data.Collections {
+		for _, r := range g.Requests {
+			names = append(names, r.Name)
+		}
+		for _, sg := range g.Groups {
+			for _, r := range sg.Requests {
+				names = append(names, r.Name)
+			}
+		}
+	}
+	placeholder := "e.g. Get Users"
+	if len(names) > 0 && len(names) <= 4 {
+		placeholder = strings.Join(names, " / ")
+	}
+
+	modal := NewModal(
+		ModalAddWorkflowStep,
+		"Add Step to: "+item.wf.Name,
+		[]ModalField{
+			{Label: "Request name", Placeholder: placeholder},
+			{Label: "Mode", Placeholder: "sequential"},
+		},
+		m.width,
+		func(vals []string) tea.Msg {
+			mode := strings.TrimSpace(vals[1])
+			if mode != "parallel" {
+				mode = "sequential"
+			}
+			return addWorkflowStepMsg{
+				workflowID:  wfID,
+				requestName: strings.TrimSpace(vals[0]),
+				mode:        mode,
+			}
+		},
+	)
+	m.modal = &modal
+	return nil
+}
+
+// deleteSelectedWorkflow deletes the currently highlighted workflow.
+func (m *Model) deleteSelectedWorkflow() tea.Cmd {
+	item, ok := m.builder.workflowScreen.list.SelectedItem().(workflowItem)
+	if !ok {
+		return nil
+	}
+	return func() tea.Msg {
+		return deleteWorkflowMsg{workflowID: item.wf.ID}
+	}
+}
+
+// deleteSelectedWorkflowStep removes the currently highlighted step.
+func (m *Model) deleteSelectedWorkflowStep() tea.Cmd {
+	wfItem, ok := m.builder.workflowScreen.list.SelectedItem().(workflowItem)
+	if !ok {
+		return nil
+	}
+	stepIdx := m.builder.workflowScreen.stepList.Index()
+	return func() tea.Msg {
+		return deleteWorkflowStepMsg{workflowID: wfItem.wf.ID, stepIdx: stepIdx}
+	}
 }
 
 func (m *Model) openDeleteModal() tea.Cmd {
@@ -1110,11 +1232,19 @@ func (m Model) buildHintBar() string {
 				hint(m.keys.NewItem, "add") +
 				hint(m.keys.DeleteItem, "delete")
 		case BuilderTabWorkflows:
-			ctx = nav +
-				hint(m.keys.Left, "list") + hint(m.keys.Right, "steps") +
-				hint(m.keys.SendRequest, "run") +
-				hint(m.keys.NewItem, "new") +
-				hint(m.keys.DeleteItem, "delete")
+			if m.builder.workflowScreen.focusList {
+				ctx = nav +
+					hint(m.keys.Right, "→ steps") +
+					hint(m.keys.SendRequest, "run") +
+					hint(m.keys.NewItem, "new workflow") +
+					hint(m.keys.DeleteItem, "delete workflow")
+			} else {
+				ctx = nav +
+					hint(m.keys.Left, "← workflows") +
+					hint(m.keys.SendRequest, "run") +
+					hint(m.keys.NewItem, "add step") +
+					hint(m.keys.DeleteItem, "remove step")
+			}
 		case BuilderTabBatch:
 			ctx = nav +
 				hint(m.keys.SendRequest, "run") +

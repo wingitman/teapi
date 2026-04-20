@@ -313,6 +313,25 @@ type addWorkflowMsg struct {
 	name string
 }
 
+// addWorkflowStepMsg adds a step to an existing workflow.
+// requestName is looked up in collections to find the request ID.
+type addWorkflowStepMsg struct {
+	workflowID  string
+	requestName string
+	mode        string // "sequential" | "parallel"
+}
+
+// deleteWorkflowMsg removes an entire workflow.
+type deleteWorkflowMsg struct {
+	workflowID string
+}
+
+// deleteWorkflowStepMsg removes one step from a workflow.
+type deleteWorkflowStepMsg struct {
+	workflowID string
+	stepIdx    int
+}
+
 type addBatchMsg struct {
 	name        string
 	sourcePath  string
