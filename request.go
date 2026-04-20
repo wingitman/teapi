@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -27,89 +28,125 @@ func doRequest(req Request, groupVars, globalVars []Variable, data AppData) tea.
 		// 1. Resolve the base URL (prepend group BaseURL if request URL is relative)
 		rawURL := resolveBaseURL(data, req)
 
-		// 2. Interpolate variables into URL, body, and header values
+		// 2. Interpolate variables into URL, body, and header values.
 		allLocalVars := req.Vars
-		url := InterpolateVars(rawURL, allLocalVars, groupVars, globalVars)
+		finalURL := InterpolateVars(rawURL, allLocalVars, groupVars, globalVars)
 		body := InterpolateVars(req.Body, allLocalVars, groupVars, globalVars)
 
-		// 3. Build the HTTP request
-		var bodyReader io.Reader
-		if body != "" {
-			bodyReader = strings.NewReader(body)
+		// 3. Execute using the shared helper.
+		result := execHTTP(req.Method, finalURL, body, req.Headers, allLocalVars, groupVars, globalVars, start)
+		switch r := result.(type) {
+		case httpErrMsg:
+			return r
+		case httpResultMsg:
+			// Run tests and add request metadata before returning.
+			r.tests = RunTests(req.Tests, r.status, headerMapToHTTPHeader(r.headers), r.body)
+			r.method = req.Method
+			r.url = finalURL
+			r.body_ = body
+			return r
 		}
+		return result
+	}
+}
 
-		httpReq, err := http.NewRequest(req.Method, url, bodyReader)
-		if err != nil {
-			return httpErrMsg{
-				err:       err,
-				method:    req.Method,
-				url:       url,
-				latencyMs: time.Since(start).Milliseconds(),
-			}
+// execHTTP performs a single HTTP call and returns httpResultMsg or httpErrMsg.
+// Shared between doRequest and executeStep to avoid duplication.
+func execHTTP(method, rawURL, body string, headers []Header, localVars, groupVars, globalVars []Variable, start time.Time) tea.Msg {
+	// Build the URL, preserving the raw path so interpolated variables
+	// (e.g. /users/{userId} after resolution → /users/42) are never
+	// re-encoded by url.Parse. Without this, path segments get percent-encoded.
+	parsedURL, err := buildRawURL(rawURL)
+	if err != nil {
+		return httpErrMsg{err: err, method: method, url: rawURL, latencyMs: time.Since(start).Milliseconds()}
+	}
+
+	var bodyReader io.Reader
+	if body != "" {
+		bodyReader = strings.NewReader(body)
+	}
+
+	httpReq := &http.Request{
+		Method: method,
+		URL:    parsedURL,
+		Header: make(http.Header),
+	}
+	if bodyReader != nil {
+		rc, ok := bodyReader.(io.ReadCloser)
+		if !ok {
+			rc = io.NopCloser(bodyReader)
 		}
+		httpReq.Body = rc
+	}
 
-		// 4. Set headers — only enabled ones
-		hasContentType := false
-		for _, h := range req.Headers {
-			if !h.Enabled {
-				continue
-			}
-			val := InterpolateVars(h.Value, allLocalVars, groupVars, globalVars)
-			httpReq.Header.Set(h.Key, val)
-			if strings.EqualFold(h.Key, "content-type") {
-				hasContentType = true
-			}
+	// Set headers
+	hasContentType := false
+	for _, h := range headers {
+		if !h.Enabled {
+			continue
 		}
-		// Auto-set Content-Type if we have a body and user didn't set it
-		if body != "" && !hasContentType {
-			httpReq.Header.Set("Content-Type", "application/json")
-		}
-
-		// 5. Execute the request
-		client := &http.Client{Timeout: 30 * time.Second}
-		resp, err := client.Do(httpReq)
-		if err != nil {
-			return httpErrMsg{
-				err:       err,
-				method:    req.Method,
-				url:       url,
-				latencyMs: time.Since(start).Milliseconds(),
-			}
-		}
-		defer resp.Body.Close()
-
-		latency := time.Since(start).Milliseconds()
-
-		rawBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return httpErrMsg{
-				err:       err,
-				method:    req.Method,
-				url:       url,
-				latencyMs: latency,
-			}
-		}
-
-		// 6. Run tests against the response
-		tests := RunTests(req.Tests, resp.StatusCode, resp.Header, string(rawBody))
-
-		// Convert header map to a simpler map[string][]string
-		headers := make(map[string][]string)
-		for k, v := range resp.Header {
-			headers[k] = v
-		}
-
-		return httpResultMsg{
-			status:    resp.StatusCode,
-			headers:   headers,
-			body:      string(rawBody),
-			latencyMs: latency,
-			tests:     tests,
-			method:    req.Method,
-			url:       url,
-			body_:     body,
+		val := InterpolateVars(h.Value, localVars, groupVars, globalVars)
+		httpReq.Header.Set(h.Key, val)
+		if strings.EqualFold(h.Key, "content-type") {
+			hasContentType = true
 		}
 	}
+	if body != "" && !hasContentType {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(httpReq)
+	if err != nil {
+		return httpErrMsg{err: err, method: method, url: rawURL, latencyMs: time.Since(start).Milliseconds()}
+	}
+	defer resp.Body.Close()
+
+	latency := time.Since(start).Milliseconds()
+	rawBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return httpErrMsg{err: err, method: method, url: rawURL, latencyMs: latency}
+	}
+
+	respHeaders := make(map[string][]string)
+	for k, v := range resp.Header {
+		respHeaders[k] = v
+	}
+
+	return httpResultMsg{
+		status:    resp.StatusCode,
+		headers:   respHeaders,
+		body:      string(rawBody),
+		latencyMs: latency,
+	}
+}
+
+// buildRawURL parses a URL string into a *url.URL while preserving the
+// original path exactly as typed (no percent-encoding of braces or other
+// chars that url.Parse would normally encode in path segments).
+func buildRawURL(rawURL string) (*url.URL, error) {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	// url.Parse encodes special chars in the path. Restore the raw path by
+	// re-parsing just the path component without encoding.
+	if parsed.RawPath == "" {
+		// No encoding happened — path is already clean.
+		return parsed, nil
+	}
+	// RawPath is set when Parse had to encode something. Restore the original.
+	parsed.RawPath = parsed.Path
+	return parsed, nil
+}
+
+// headerMapToHTTPHeader converts map[string][]string to http.Header.
+func headerMapToHTTPHeader(m map[string][]string) http.Header {
+	h := make(http.Header)
+	for k, v := range m {
+		h[k] = v
+	}
+	return h
 }
 
 // ── Open in editor ────────────────────────────────────────────────────────────

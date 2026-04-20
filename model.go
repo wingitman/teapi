@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"charm.land/bubbles/v2/help"
+	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
@@ -45,9 +45,7 @@ type Model struct {
 	cfg  Config
 	keys KeyMap
 
-	// Help bar
-	help     help.Model
-	showHelp bool
+	// (help overlay removed — the dynamic hint bar covers all keybinds)
 
 	// Terminal size
 	width  int
@@ -87,8 +85,7 @@ func NewModel() (Model, error) {
 		cfg:   cfg,
 		keys:  keys,
 		data:  data,
-		focus: PanelBuilder, // start focused on the builder so the user can type immediately
-		help:  help.New(),
+		focus: PanelBuilder,
 	}
 
 	// Panels will be properly sized on the first WindowSizeMsg.
@@ -275,8 +272,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			Name:     msg.name,
 			Type:     msg.testType,
 			Expected: msg.expected,
+			JSONPath: msg.jsonPath,
 		})
 		m.saveCurrentRequest()
+		cmds = append(cmds, saveDataCmd(m.data))
+
+	case addWorkflowMsg:
+		wf := Workflow{ID: newID(), Name: msg.name}
+		m.data.Workflows = append(m.data.Workflows, wf)
+		// Rebuild the workflow screen with updated data
+		m.builder.workflowScreen = NewWorkflowScreen(m.data.Workflows, m.builder.width, m.builder.height-4)
+		m.statusMsg = dimStyle.Render("Workflow created.")
+		cmds = append(cmds, saveDataCmd(m.data))
+
+	case addBatchMsg:
+		b := Batch{
+			ID:          newID(),
+			Name:        msg.name,
+			SourcePath:  msg.sourcePath,
+			SourceType:  msg.sourceType,
+			URLTemplate: msg.urlTemplate,
+			Method:      msg.method,
+			Concurrency: 1,
+		}
+		m.data.Batches = append(m.data.Batches, b)
+		// Rebuild the batch screen with updated data
+		m.builder.batchScreen = NewBatchScreen(m.data.Batches, m.builder.width, m.builder.height-4)
+		m.statusMsg = dimStyle.Render("Batch run created.")
 		cmds = append(cmds, saveDataCmd(m.data))
 
 	case modalCancelMsg:
@@ -373,64 +395,64 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-		// ── Edit mode: only Esc and Ctrl+C are intercepted globally ─────────
-		//
-		// When a text field is active, every key except Esc types into it.
-		// We pass the message straight to the builder (which owns the field).
+		// ── Edit mode: Esc and Tab are intercepted; everything else types ──────
 		if m.editMode {
-			switch msg.String() {
-			case "esc":
+			switch {
+			case key_matches(msg, m.keys.Escape):
 				m.exitEditMode()
-			case "tab":
-				// Tab from URL → Body; Tab from Body → next section (Headers)
+			case key_matches(msg, m.keys.TabNext):
+				// Tab from URL → Body; Tab from Body → exit edit + next section
 				if m.builder.innerFocus == BuilderFocusURL {
 					m.builder.urlInput.Blur()
 					cmd := m.builder.bodyInput.Focus()
 					m.builder.innerFocus = BuilderFocusBody
 					cmds = append(cmds, cmd)
 				} else {
-					// Exit body, move to Headers sub-tab
 					m.exitEditMode()
 					m.builder.activeTab = BuilderTabHeaders
 				}
 			default:
-				// Forward everything else to the active text field
 				cmd := m.routeKeyToPanel(msg)
 				cmds = append(cmds, cmd)
 			}
 			return m, tea.Batch(cmds...)
 		}
 
-		// ── Navigate mode: single-letter keys drive all navigation ────────
+		// ── Navigate mode ────────────────────────────────────────────────────
+		//
+		// All keys are matched via key_matches() against the KeyMap, which is
+		// built from teapi.toml. This means every binding is fully remappable.
 
-		switch msg.String() {
+		switch {
 
-		// Quit — always works
-		case "q", "ctrl+c":
+		// Quit
+		case key_matches(msg, m.keys.Quit):
 			return m, tea.Quit
 
-		// Help overlay toggle
-		case "?":
-			m.showHelp = !m.showHelp
-
-		// Tab / Shift+Tab — the primary navigation mechanism.
-		// Cycles: Sidebar → Request → Headers → Variables → Tests → Response → Sidebar
-		case "tab":
+		// Tab / Shift+Tab — primary section navigation
+		case key_matches(msg, m.keys.TabNext):
 			m.tabForward()
 
-		case "shift+tab":
+		case key_matches(msg, m.keys.TabPrev):
 			m.tabBackward()
 
-		// Enter — context-sensitive confirm / activate
-		case "enter":
+		// Up / Down — list navigation and response scrolling
+		case key_matches(msg, m.keys.Up) || key_matches(msg, m.keys.Down):
+			cmds = append(cmds, m.routeKeyToPanel(msg))
+
+		// Left / Right — workflow panel switching; other directional uses
+		case key_matches(msg, m.keys.Left) || key_matches(msg, m.keys.Right):
+			if m.focus == PanelBuilder {
+				cmds = append(cmds, m.routeKeyToPanel(msg))
+			}
+
+		// Enter — confirm / activate
+		case key_matches(msg, m.keys.Enter):
 			switch m.focus {
 			case PanelSidebar:
-				// Expand group or load request
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
+				cmds = append(cmds, m.routeKeyToPanel(msg))
 			case PanelBuilder:
 				if m.builder.activeTab == BuilderTabRequest {
-					// Enter edit mode for the URL field
 					m.editMode = true
 					m.builder.innerFocus = BuilderFocusURL
 					cmd := m.builder.urlInput.Focus()
@@ -438,19 +460,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 
-		// Send request / run workflow / run batch — context-sensitive
-		case "s":
+		// Space — toggle header enabled/disabled
+		case key_matches(msg, m.keys.Space):
+			if m.focus == PanelBuilder {
+				cmds = append(cmds, m.routeKeyToPanel(msg))
+			}
+
+		// Send request / run workflow / run batch
+		case key_matches(msg, m.keys.SendRequest):
 			switch {
 			case m.focus == PanelBuilder && m.builder.activeTab == BuilderTabWorkflows:
-				// Run the selected workflow
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
+				if item, ok := m.builder.workflowScreen.list.SelectedItem().(workflowItem); ok {
+					m.builder.workflowScreen.running = true
+					cmds = append(cmds, runWorkflowCmd(item.wf, m.data))
+				}
 			case m.focus == PanelBuilder && m.builder.activeTab == BuilderTabBatch:
-				// Run the selected batch
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
+				if item, ok := m.builder.batchScreen.list.SelectedItem().(batchItem); ok {
+					m.builder.batchScreen.running = true
+					cmds = append(cmds, runBatchCmd(item.b, m.data.GlobalVars))
+				}
 			default:
-				// Send HTTP request
 				m.saveCurrentRequest()
 				req := m.builder.CurrentRequest()
 				m.response.Loading = true
@@ -460,99 +489,91 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, saveDataCmd(m.data))
 			}
 
-		// Cycle HTTP method (builder, request tab only)
-		case "m":
-			if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabRequest {
-				m.builder.methodIdx = (m.builder.methodIdx + 1) % len(httpMethods)
+		// New item
+		case key_matches(msg, m.keys.NewItem):
+			if m.focus == PanelSidebar {
+				cmds = append(cmds, m.openNewItemModal())
+			} else if m.focus == PanelBuilder {
+				cmds = append(cmds, m.openNewItemModalForBuilder())
 			}
 
-		// Open teapi.toml in editor
-		case "o":
+		// Delete item
+		case key_matches(msg, m.keys.DeleteItem):
+			if m.focus == PanelSidebar {
+				cmds = append(cmds, m.openDeleteModal())
+			} else if m.focus == PanelBuilder {
+				cmds = append(cmds, m.routeKeyToPanel(msg))
+			}
+
+		// Open config in editor
+		case key_matches(msg, m.keys.OpenConfig):
 			cmds = append(cmds, openConfigCmd())
 
 		// Open request body in editor
-		case "E":
+		case key_matches(msg, m.keys.OpenEditor):
 			if m.focus == PanelBuilder {
 				cmds = append(cmds, openEditorCmd(m.builder.bodyInput.Value(), true, ".json"))
 			}
 
 		// Open response body in editor
-		case "R":
+		case key_matches(msg, m.keys.OpenResponse):
 			if m.focus == PanelResponse {
 				cmds = append(cmds, openEditorCmd(m.response.Body, false, ".json"))
 			}
 
-		// New item (sidebar or builder list tabs)
-		case "n":
-			if m.focus == PanelSidebar {
-				cmd := m.openNewItemModal()
-				cmds = append(cmds, cmd)
-			} else if m.focus == PanelBuilder {
-				cmd := m.openNewItemModalForBuilder()
-				cmds = append(cmds, cmd)
-			}
-
-		// N (shift+n) — add global variable (only on Variables tab)
-		case "N":
-			if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabVariables {
-				modal := NewModal(
-					ModalAddVariable,
-					"Add Global Variable",
-					[]ModalField{
-						{Label: "Key", Placeholder: "api_token"},
-						{Label: "Value", Placeholder: "my-secret-value"},
-					},
-					m.width,
-					func(vals []string) tea.Msg {
-						return addVariableMsg{key: vals[0], value: vals[1], varType: "static", global: true}
-					},
-				)
-				m.modal = &modal
-			}
-
-		// Delete item
-		case "d":
-			if m.focus == PanelSidebar {
-				cmd := m.openDeleteModal()
-				cmds = append(cmds, cmd)
-			} else if m.focus == PanelBuilder {
-				// Delete selected row in Headers/Variables/Tests
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
-			}
-
-		// Space — toggle header enabled/disabled
-		case " ":
-			if m.focus == PanelBuilder {
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
-			}
-
-		// Up / Down / j / k — navigate within sidebar or builder list tabs
-		case "up", "down", "k", "j":
-			cmd := m.routeKeyToPanel(msg)
-			cmds = append(cmds, cmd)
-
-		// Sidebar-specific single-letter actions
-		case "r", "e":
-			if m.focus == PanelSidebar {
-				cmd := m.routeKeyToPanel(msg)
-				cmds = append(cmds, cmd)
-			} else if msg.String() == "e" && m.focus == PanelBuilder {
-				// Edit selected header
-				if m.builder.activeTab == BuilderTabHeaders {
-					cmd := m.openEditHeaderModal()
-					cmds = append(cmds, cmd)
+		// Single-letter fallback keys not in the main keymap
+		// (these are hardcoded UX shortcuts that don't warrant a config entry)
+		default:
+			switch msg.String() {
+			// m — cycle HTTP method
+			case "m":
+				if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabRequest {
+					m.builder.methodIdx = (m.builder.methodIdx + 1) % len(httpMethods)
 				}
-			}
 
-		// Open teapi.json in editor (sidebar only)
-		case "O":
-			if m.focus == PanelSidebar {
-				cmds = append(cmds, openDataFileCmd())
+			// N (Shift+N) — add global variable
+			case "N":
+				if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabVariables {
+					modal := NewModal(
+						ModalAddVariable,
+						"Add Global Variable",
+						[]ModalField{
+							{Label: "Key", Placeholder: "api_token"},
+							{Label: "Value", Placeholder: "my-secret-value"},
+						},
+						m.width,
+						func(vals []string) tea.Msg {
+							return addVariableMsg{key: vals[0], value: vals[1], varType: "static", global: true}
+						},
+					)
+					m.modal = &modal
+				}
+
+			// r — rename (sidebar)
+			case "r":
+				if m.focus == PanelSidebar {
+					cmds = append(cmds, m.routeKeyToPanel(msg))
+				}
+
+			// e — edit (sidebar or builder headers)
+			case "e":
+				if m.focus == PanelSidebar {
+					cmds = append(cmds, m.routeKeyToPanel(msg))
+				} else if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabHeaders {
+					cmds = append(cmds, m.openEditHeaderModal())
+				}
+
+			// O (Shift+O) — open teapi.json in editor (sidebar only)
+			case "O":
+				if m.focus == PanelSidebar {
+					cmds = append(cmds, openDataFileCmd())
+				}
 			}
 		}
 	}
+
+	// Keep builder's appData in sync so workflow/batch screens have full data.
+	m.builder.appData = m.data
 
 	return m, tea.Batch(cmds...)
 }
@@ -660,20 +681,49 @@ func (m *Model) openNewItemModalForBuilder() tea.Cmd {
 		m.modal = &modal
 
 	case BuilderTabTests:
+		modal := NewTestModal(m.width)
+		m.modal = &modal
+
+	case BuilderTabWorkflows:
 		modal := NewModal(
-			ModalAddVariable,
-			"Add Test",
+			ModalAddWorkflow,
+			"New Workflow",
 			[]ModalField{
-				{Label: "Name", Placeholder: "Status is 200"},
-				{Label: "Type", Placeholder: "status_equals / body_contains / jsonpath_equals"},
-				{Label: "Expected", Placeholder: "200 / text / $.field value"},
+				{Label: "Name", Placeholder: "Login then Get Users"},
 			},
 			m.width,
 			func(vals []string) tea.Msg {
-				return addTestMsg{
-					name:     vals[0],
-					testType: vals[1],
-					expected: vals[2],
+				return addWorkflowMsg{name: vals[0]}
+			},
+		)
+		m.modal = &modal
+
+	case BuilderTabBatch:
+		modal := NewModal(
+			ModalAddBatch,
+			"New Batch Run",
+			[]ModalField{
+				{Label: "Name", Placeholder: "Load test users"},
+				{Label: "Source file", Placeholder: "/path/to/urls.txt  or  /path/to/data.csv"},
+				{Label: "URL template", Placeholder: "https://api.example.com/{line}  or  https://api.example.com/{id}"},
+				{Label: "Method", Placeholder: "GET"},
+			},
+			m.width,
+			func(vals []string) tea.Msg {
+				sourceType := "txt"
+				if len(vals[1]) > 4 && vals[1][len(vals[1])-4:] == ".csv" {
+					sourceType = "csv"
+				}
+				method := vals[3]
+				if method == "" {
+					method = "GET"
+				}
+				return addBatchMsg{
+					name:        vals[0],
+					sourcePath:  vals[1],
+					sourceType:  sourceType,
+					urlTemplate: vals[2],
+					method:      strings.ToUpper(method),
 				}
 			},
 		)
@@ -709,14 +759,23 @@ func (m *Model) openDeleteModal() tea.Cmd {
 	if node == nil {
 		return nil
 	}
-	if node.Kind == NodeRequest {
-		// Delete request directly — no confirm needed for a single request
+	switch node.Kind {
+	case NodeRequest:
 		deleteRequest(&m.data, node.RequestID)
 		m.sidebar.Rebuild(m.data)
 		m.statusMsg = dimStyle.Render("Request deleted.")
 		return saveDataCmd(m.data)
+
+	case NodeHistEntry:
+		idx := node.HistIdx
+		if idx >= 0 && idx < len(m.data.History) {
+			m.data.History = append(m.data.History[:idx], m.data.History[idx+1:]...)
+			m.sidebar.Rebuild(m.data)
+			m.statusMsg = dimStyle.Render("History entry deleted.")
+			return saveDataCmd(m.data)
+		}
 	}
-	// Groups are handled via sidebarDeleteGroupMsg (which opens a confirm modal)
+	// Groups handled via sidebarDeleteGroupMsg (confirm modal)
 	return nil
 }
 
@@ -919,11 +978,10 @@ func (m Model) applyLayout() Model {
 	m.sidebar.height = totalContentH
 	m.builder.SetSize(mainW, builderH)
 	m.response.SetSize(mainW, responseH)
-	// Keep builder's embedded screens sized to the builder panel
-	m.builder.workflowScreen.width = mainW
-	m.builder.workflowScreen.height = builderH - 4
-	m.builder.batchScreen.width = mainW
-	m.builder.batchScreen.height = builderH - 4
+	// Resize embedded workflow/batch screens — this also resizes their
+	// internal bubbles/list components so they render correctly.
+	m.builder.workflowScreen.SetSize(mainW, builderH-4)
+	m.builder.batchScreen.SetSize(mainW, builderH-4)
 
 	return m
 }
@@ -966,7 +1024,7 @@ func (m Model) renderNormalLayout() string {
 	soft := lipgloss.NewStyle().Foreground(lipgloss.Color("#5865F2")).Bold(true).Render("soft")
 	appName := lipgloss.NewStyle().Foreground(colGray).Render(" / teapi")
 	brand := " " + delby + soft + appName + " "
-	rightHints := dimStyle.Render("o:config  ?:help  q:quit")
+	rightHints := dimStyle.Render("o:config  q:quit")
 	pad := m.width - lipgloss.Width(brand) - lipgloss.Width(rightHints)
 	if pad < 0 {
 		pad = 0
@@ -974,12 +1032,7 @@ func (m Model) renderNormalLayout() string {
 	titleBar := brand + strings.Repeat(" ", pad) + rightHints
 
 	// Hint bar — below the response panel, outside all borders, full terminal width
-	var hintBar string
-	if m.showHelp {
-		hintBar = m.help.View(m.keys)
-	} else {
-		hintBar = m.buildHintBar()
-	}
+	hintBar := m.buildHintBar()
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		titleBar,
@@ -995,72 +1048,83 @@ func (m Model) buildHintBar() string {
 	// Divider across full width
 	divider := hintDividerStyle.Render(strings.Repeat("─", m.width))
 
-	// Global line — always the same regardless of section
-	global := hintKeyStyle.Render("Tab") + hintStyle.Render(":next section  ") +
-		hintKeyStyle.Render("Shift+Tab") + hintStyle.Render(":prev section  ") +
-		hintKeyStyle.Render("s") + hintStyle.Render(":send  ") +
-		hintKeyStyle.Render("?") + hintStyle.Render(":help  ") +
-		hintKeyStyle.Render("q") + hintStyle.Render(":quit")
+	// Helper: render a key+description hint pair using the actual bound key string.
+	hint := func(binding key.Binding, desc string) string {
+		keys := binding.Keys()
+		if len(keys) == 0 {
+			return ""
+		}
+		return hintKeyStyle.Render(keys[0]) + hintStyle.Render(":"+desc+"  ")
+	}
 
-	// Context line — changes based on focus + state
+	// Global line — always shown, uses actual bound keys from config.
+	global := hint(m.keys.TabNext, "next section") +
+		hint(m.keys.TabPrev, "prev section") +
+		hint(m.keys.SendRequest, "send") +
+		hint(m.keys.Quit, "quit")
+
+	// Context line — changes based on focus + state.
 	var ctx string
+	// nav shows the up/down keys from config.
+	nav := hint(m.keys.Up, "up") + hint(m.keys.Down, "down")
+
 	switch m.focus {
 	case PanelSidebar:
-		ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-			hintKeyStyle.Render("enter") + hintStyle.Render(":load  ") +
-			hintKeyStyle.Render("n") + hintStyle.Render(":new  ") +
+		ctx = nav +
+			hint(m.keys.Enter, "load") +
+			hint(m.keys.NewItem, "new") +
 			hintKeyStyle.Render("r") + hintStyle.Render(":rename  ") +
 			hintKeyStyle.Render("e") + hintStyle.Render(":edit  ") +
-			hintKeyStyle.Render("d") + hintStyle.Render(":delete  ") +
+			hint(m.keys.DeleteItem, "delete") +
 			hintKeyStyle.Render("o") + hintStyle.Render(":open file")
 
 	case PanelBuilder:
 		switch m.builder.activeTab {
 		case BuilderTabRequest:
 			if m.editMode && m.builder.innerFocus == BuilderFocusBody {
-				ctx = hintKeyStyle.Render("Esc") + hintStyle.Render(":exit body  ") +
-					hintKeyStyle.Render("Tab") + hintStyle.Render(":next section")
+				ctx = hint(m.keys.Escape, "exit body") +
+					hint(m.keys.TabNext, "next section")
 			} else if m.editMode && m.builder.innerFocus == BuilderFocusURL {
-				ctx = hintKeyStyle.Render("Esc") + hintStyle.Render(":exit URL  ") +
-					hintKeyStyle.Render("Tab") + hintStyle.Render(":edit body  ") +
+				ctx = hint(m.keys.Escape, "exit URL") +
+					hint(m.keys.TabNext, "edit body") +
 					hintKeyStyle.Render("m") + hintStyle.Render(":method  ") +
-					hintKeyStyle.Render("E") + hintStyle.Render(":open in editor")
+					hint(m.keys.OpenEditor, "open in editor")
 			} else {
-				ctx = hintKeyStyle.Render("enter") + hintStyle.Render(":edit URL  ") +
+				ctx = hint(m.keys.Enter, "edit URL") +
 					hintKeyStyle.Render("m") + hintStyle.Render(":method  ") +
-					hintKeyStyle.Render("E") + hintStyle.Render(":open body in editor")
+					hint(m.keys.OpenEditor, "open body in editor")
 			}
 		case BuilderTabHeaders:
-			ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-				hintKeyStyle.Render("n") + hintStyle.Render(":add  ") +
+			ctx = nav +
+				hint(m.keys.NewItem, "add") +
 				hintKeyStyle.Render("e") + hintStyle.Render(":edit  ") +
-				hintKeyStyle.Render("d") + hintStyle.Render(":delete  ") +
-				hintKeyStyle.Render("space") + hintStyle.Render(":toggle")
+				hint(m.keys.DeleteItem, "delete") +
+				hint(m.keys.Space, "toggle")
 		case BuilderTabVariables:
-			ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-				hintKeyStyle.Render("n") + hintStyle.Render(":add local  ") +
+			ctx = nav +
+				hint(m.keys.NewItem, "add local") +
 				hintKeyStyle.Render("N") + hintStyle.Render(":add global  ") +
-				hintKeyStyle.Render("d") + hintStyle.Render(":delete")
+				hint(m.keys.DeleteItem, "delete")
 		case BuilderTabTests:
-			ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-				hintKeyStyle.Render("n") + hintStyle.Render(":add  ") +
-				hintKeyStyle.Render("d") + hintStyle.Render(":delete")
+			ctx = nav +
+				hint(m.keys.NewItem, "add") +
+				hint(m.keys.DeleteItem, "delete")
 		case BuilderTabWorkflows:
-			ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-				hintKeyStyle.Render("s") + hintStyle.Render(":run workflow  ") +
-				hintKeyStyle.Render("n") + hintStyle.Render(":new  ") +
-				hintKeyStyle.Render("d") + hintStyle.Render(":delete  ") +
-				hintKeyStyle.Render("←→") + hintStyle.Render(":switch panel")
+			ctx = nav +
+				hint(m.keys.Left, "list") + hint(m.keys.Right, "steps") +
+				hint(m.keys.SendRequest, "run") +
+				hint(m.keys.NewItem, "new") +
+				hint(m.keys.DeleteItem, "delete")
 		case BuilderTabBatch:
-			ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":nav  ") +
-				hintKeyStyle.Render("s") + hintStyle.Render(":run batch  ") +
-				hintKeyStyle.Render("n") + hintStyle.Render(":new  ") +
-				hintKeyStyle.Render("d") + hintStyle.Render(":delete")
+			ctx = nav +
+				hint(m.keys.SendRequest, "run") +
+				hint(m.keys.NewItem, "new") +
+				hint(m.keys.DeleteItem, "delete")
 		}
 
 	case PanelResponse:
-		ctx = hintKeyStyle.Render("↑↓") + hintStyle.Render(":scroll  ") +
-			hintKeyStyle.Render("R") + hintStyle.Render(":open in editor")
+		ctx = nav +
+			hint(m.keys.OpenResponse, "open in editor")
 	}
 
 	// Status message: show on the context line when present
@@ -1079,6 +1143,7 @@ type addTestMsg struct {
 	name     string
 	testType string
 	expected string
+	jsonPath string
 }
 
 // now returns the current time.

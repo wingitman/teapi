@@ -62,6 +62,10 @@ type BuilderPanel struct {
 	// Batch tab (embedded BatchScreen)
 	batchScreen BatchScreen
 
+	// Full AppData reference — needed so workflow/batch screens can look up
+	// request names and run with the correct collections.
+	appData AppData
+
 	width  int
 	height int
 }
@@ -83,8 +87,9 @@ func NewBuilderPanel(width, height int, data AppData) BuilderPanel {
 		bodyInput:      b,
 		innerFocus:     BuilderFocusURL,
 		globalVars:     data.GlobalVars,
+		appData:        data,
 		workflowScreen: NewWorkflowScreen(data.Workflows, width, height-4),
-		batchScreen:    NewBatchScreen(nil, width, height-4),
+		batchScreen:    NewBatchScreen(data.Batches, width, height-4),
 		width:          width,
 		height:         height,
 	}
@@ -165,7 +170,6 @@ func (bp BuilderPanel) Update(msg tea.Msg, keys KeyMap) (BuilderPanel, tea.Cmd) 
 					if bp.varCursor > 0 {
 						bp.varCursor--
 					} else {
-						// Cross boundary into local section
 						bp.varInGlobal = false
 						bp.varCursor = max(0, len(bp.variables)-1)
 					}
@@ -180,11 +184,11 @@ func (bp BuilderPanel) Update(msg tea.Msg, keys KeyMap) (BuilderPanel, tea.Cmd) 
 				}
 			case BuilderTabWorkflows:
 				var cmd tea.Cmd
-				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, AppData{Workflows: bp.workflowScreen.workflows})
+				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, bp.appData)
 				cmds = append(cmds, cmd)
 			case BuilderTabBatch:
 				var cmd tea.Cmd
-				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, nil)
+				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, bp.appData.GlobalVars)
 				cmds = append(cmds, cmd)
 			}
 
@@ -199,7 +203,6 @@ func (bp BuilderPanel) Update(msg tea.Msg, keys KeyMap) (BuilderPanel, tea.Cmd) 
 					if bp.varCursor < len(bp.variables)-1 {
 						bp.varCursor++
 					} else {
-						// Cross boundary into global section
 						bp.varInGlobal = true
 						bp.varCursor = 0
 					}
@@ -214,11 +217,20 @@ func (bp BuilderPanel) Update(msg tea.Msg, keys KeyMap) (BuilderPanel, tea.Cmd) 
 				}
 			case BuilderTabWorkflows:
 				var cmd tea.Cmd
-				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, AppData{Workflows: bp.workflowScreen.workflows})
+				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, bp.appData)
 				cmds = append(cmds, cmd)
 			case BuilderTabBatch:
 				var cmd tea.Cmd
-				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, nil)
+				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, bp.appData.GlobalVars)
+				cmds = append(cmds, cmd)
+			}
+
+		// Left/Right — switch between Workflows list and Steps list
+		case key_matches(msg, keys.Left) || key_matches(msg, keys.Right):
+			switch bp.activeTab {
+			case BuilderTabWorkflows:
+				var cmd tea.Cmd
+				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, bp.appData)
 				cmds = append(cmds, cmd)
 			}
 
@@ -227,11 +239,11 @@ func (bp BuilderPanel) Update(msg tea.Msg, keys KeyMap) (BuilderPanel, tea.Cmd) 
 			switch bp.activeTab {
 			case BuilderTabWorkflows:
 				var cmd tea.Cmd
-				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, AppData{Workflows: bp.workflowScreen.workflows})
+				bp.workflowScreen, cmd = bp.workflowScreen.Update(msg, keys, bp.appData)
 				cmds = append(cmds, cmd)
 			case BuilderTabBatch:
 				var cmd tea.Cmd
-				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, nil)
+				bp.batchScreen, cmd = bp.batchScreen.Update(msg, keys, bp.appData.GlobalVars)
 				cmds = append(cmds, cmd)
 			}
 

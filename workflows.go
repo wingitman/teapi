@@ -3,9 +3,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
-	"strings"
 	"sync"
 	"time"
 
@@ -84,47 +81,26 @@ func runWorkflowCmd(wf Workflow, data AppData) tea.Cmd {
 }
 
 // executeStep runs a single workflow step and returns its result.
+// Uses the shared execHTTP helper so URL encoding is handled correctly.
 func executeStep(req Request, data AppData) StepResult {
 	start := time.Now()
-	url := resolveBaseURL(data, req)
-	url = InterpolateVars(url, req.Vars, nil, data.GlobalVars)
+	rawURL := resolveBaseURL(data, req)
+	finalURL := InterpolateVars(rawURL, req.Vars, nil, data.GlobalVars)
 	body := InterpolateVars(req.Body, req.Vars, nil, data.GlobalVars)
 
-	var bodyReader io.Reader
-	if body != "" {
-		bodyReader = strings.NewReader(body)
-	}
-
-	httpReq, err := http.NewRequest(req.Method, url, bodyReader)
-	if err != nil {
-		return StepResult{RequestID: req.ID, Err: err, LatencyMs: time.Since(start).Milliseconds()}
-	}
-
-	for _, h := range req.Headers {
-		if h.Enabled {
-			httpReq.Header.Set(h.Key, h.Value)
+	result := execHTTP(req.Method, finalURL, body, req.Headers, req.Vars, nil, data.GlobalVars, start)
+	switch r := result.(type) {
+	case httpErrMsg:
+		return StepResult{RequestID: req.ID, Err: r.err, LatencyMs: r.latencyMs}
+	case httpResultMsg:
+		return StepResult{
+			RequestID: req.ID,
+			Status:    r.status,
+			LatencyMs: r.latencyMs,
+			Body:      r.body,
 		}
 	}
-	if body != "" {
-		httpReq.Header.Set("Content-Type", "application/json")
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return StepResult{RequestID: req.ID, Err: err, LatencyMs: time.Since(start).Milliseconds()}
-	}
-	defer resp.Body.Close()
-
-	latency := time.Since(start).Milliseconds()
-	rawBody, _ := io.ReadAll(resp.Body)
-
-	return StepResult{
-		RequestID: req.ID,
-		Status:    resp.StatusCode,
-		LatencyMs: latency,
-		Body:      string(rawBody),
-	}
+	return StepResult{RequestID: req.ID, Err: fmt.Errorf("unexpected result type")}
 }
 
 // runParallelSteps runs a group of steps concurrently.
@@ -228,6 +204,27 @@ func NewWorkflowScreen(workflows []Workflow, width, height int) WorkflowScreen {
 		width:     width,
 		height:    height,
 	}
+}
+
+// SetSize resizes the workflow screen and its internal lists.
+// Must be called whenever the parent panel changes size.
+func (ws *WorkflowScreen) SetSize(width, height int) {
+	ws.width = width
+	ws.height = height
+	halfW := width/2 - 2
+	if halfW < 4 {
+		halfW = 4
+	}
+	rightW := width - halfW - 4
+	if rightW < 4 {
+		rightW = 4
+	}
+	listH := height - 4
+	if listH < 2 {
+		listH = 2
+	}
+	ws.list.SetSize(halfW, listH)
+	ws.stepList.SetSize(rightW, listH)
 }
 
 // Update handles key events for the workflow screen.

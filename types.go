@@ -13,10 +13,11 @@ var httpMethods = []string{"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPT
 
 // AppData is the root object persisted to disk.
 type AppData struct {
-	Collections []Group    `json:"collections"`
-	GlobalVars  []Variable `json:"global_vars"`
+	Collections []Group     `json:"collections"`
+	GlobalVars  []Variable  `json:"global_vars"`
 	History     []HistEntry `json:"history"`
 	Workflows   []Workflow  `json:"workflows"`
+	Batches     []Batch     `json:"batches"`
 }
 
 // Group is a named container for requests (like a Postman collection).
@@ -305,3 +306,17 @@ type sidebarRenameMsg struct{ node SidebarNode }
 type sidebarEditMsg struct{ node SidebarNode }
 type sidebarDeleteGroupMsg struct{ node SidebarNode }
 type sidebarOpenDataMsg struct{}
+
+// ── Workflow / Batch creation messages ───────────────────────────────────────
+
+type addWorkflowMsg struct {
+	name string
+}
+
+type addBatchMsg struct {
+	name        string
+	sourcePath  string
+	sourceType  string
+	urlTemplate string
+	method      string
+}

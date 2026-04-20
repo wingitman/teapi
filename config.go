@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"charm.land/bubbles/v2/key"
 	"github.com/BurntSushi/toml"
@@ -10,34 +11,59 @@ import (
 
 // ── Config ────────────────────────────────────────────────────────────────────
 //
-// Config is loaded from ~/.config/delbysoft/teapi.toml on startup.
-// If the file doesn't exist, defaults are used and the file is created.
+// Config is loaded from the platform-appropriate path on startup:
+//   Linux:   ~/.config/delbysoft/teapi.toml
+//   macOS:   ~/Library/Application Support/delbysoft/teapi.toml
+//   Windows: %AppData%\Roaming\delbysoft\teapi.toml
+//
+// If the file doesn't exist it is created with all defaults and comments.
+// If the file exists but is missing new keys (migration), it is rewritten
+// with the new keys added while preserving all existing user values.
 
-// ConfigKeys holds the raw string keybindings as read from TOML.
-// The user edits these strings in the TOML file to rebind keys.
+// ConfigKeys holds every configurable key binding.
+// Every key used anywhere in teapi is listed here so the user can remap
+// anything by editing the TOML file.
 type ConfigKeys struct {
-	FocusSidebar  string `toml:"focus_sidebar"`
-	FocusBuilder  string `toml:"focus_builder"`
-	FocusResponse string `toml:"focus_response"`
-	SendRequest   string `toml:"send_request"`
-	NewItem       string `toml:"new_item"`
-	DeleteItem    string `toml:"delete_item"`
-	Workflows     string `toml:"workflows"`
-	Batch         string `toml:"batch"`
-	GlobalVars    string `toml:"global_vars"`
-	Quit          string `toml:"quit"`
-	Help          string `toml:"help"`
-	TabNext       string `toml:"tab_next"`
-	TabPrev       string `toml:"tab_prev"`
-	OpenEditor    string `toml:"open_editor"`
-	OpenResponse  string `toml:"open_response"`
-	OpenConfig    string `toml:"open_config"`
+	// ── Navigation ──────────────────────────────────────────────────────────
+	Up     string `toml:"up"`
+	Down   string `toml:"down"`
+	Left   string `toml:"left"`
+	Right  string `toml:"right"`
+	Enter  string `toml:"enter"`
+	Escape string `toml:"escape"`
+	Space  string `toml:"space"`
+
+	// Section cycling
+	TabNext string `toml:"tab_next"`
+	TabPrev string `toml:"tab_prev"`
+
+	// ── Actions ─────────────────────────────────────────────────────────────
+	SendRequest string `toml:"send_request"`
+	NewItem     string `toml:"new_item"`
+	DeleteItem  string `toml:"delete_item"`
+
+	// ── Open in editor ───────────────────────────────────────────────────────
+	OpenEditor   string `toml:"open_editor"`
+	OpenResponse string `toml:"open_response"`
+	OpenConfig   string `toml:"open_config"`
+
+	// ── App-level ────────────────────────────────────────────────────────────
+	Quit string `toml:"quit"`
+
+	// Kept for config file compatibility with older versions but unused.
+	FocusSidebar  string `toml:"focus_sidebar,omitempty"`
+	FocusBuilder  string `toml:"focus_builder,omitempty"`
+	FocusResponse string `toml:"focus_response,omitempty"`
+	Workflows     string `toml:"workflows,omitempty"`
+	Batch         string `toml:"batch,omitempty"`
+	GlobalVars    string `toml:"global_vars,omitempty"`
+	Help          string `toml:"help,omitempty"`
 }
 
 // ConfigUI holds UI preferences.
 type ConfigUI struct {
 	SidebarWidth  int    `toml:"sidebar_width"`
-	ResponseSplit int    `toml:"response_split"` // % of right panel for builder (rest = response)
+	ResponseSplit int    `toml:"response_split"` // % of right panel height for builder
 	Theme         string `toml:"theme"`
 }
 
@@ -47,27 +73,26 @@ type Config struct {
 	UI   ConfigUI   `toml:"ui"`
 }
 
-// defaultConfig returns the default configuration.
+// defaultConfig returns the full set of defaults.
 func defaultConfig() Config {
 	return Config{
 		Keys: ConfigKeys{
-			// Tab/Shift+Tab drive all section navigation — no Ctrl+ needed.
-			FocusSidebar:  "",
-			FocusBuilder:  "",
-			FocusResponse: "",
-			SendRequest:   "s",
-			NewItem:       "n",
-			DeleteItem:    "d",
-			Workflows:     "w",
-			Batch:         "b",
-			GlobalVars:    "g",
-			Quit:          "q",
-			Help:          "?",
-			TabNext:       "tab",
-			TabPrev:       "shift+tab",
-			OpenEditor:    "E",
-			OpenResponse:  "R",
-			OpenConfig:    "o",
+			Up:           "up",
+			Down:         "down",
+			Left:         "left",
+			Right:        "right",
+			Enter:        "enter",
+			Escape:       "esc",
+			Space:        " ",
+			TabNext:      "tab",
+			TabPrev:      "shift+tab",
+			SendRequest:  "s",
+			NewItem:      "n",
+			DeleteItem:   "d",
+			OpenEditor:   "E",
+			OpenResponse: "R",
+			OpenConfig:   "o",
+			Quit:         "q",
 		},
 		UI: ConfigUI{
 			SidebarWidth:  28,
@@ -77,7 +102,14 @@ func defaultConfig() Config {
 	}
 }
 
-// configPath returns the path to the TOML config file.
+// ── Paths ─────────────────────────────────────────────────────────────────────
+
+// configPath returns the platform-appropriate path to teapi.toml.
+// Uses os.UserConfigDir() which returns:
+//
+//	Linux:   $HOME/.config
+//	macOS:   $HOME/Library/Application Support
+//	Windows: %AppData%\Roaming
 func configPath() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
@@ -86,30 +118,75 @@ func configPath() string {
 	return filepath.Join(dir, "delbysoft", "teapi.toml")
 }
 
-// LoadConfig reads the config file. If it doesn't exist, it creates it with defaults.
+// dataPath is also in data.go but referenced from config.go for migration
+// messages. It uses the same base directory.
+
+// ── Load / Save ───────────────────────────────────────────────────────────────
+
+// LoadConfig reads the config file.
+// • First launch: creates the file with all defaults + comments, returns defaults.
+// • Existing file: decodes user values, then migrates missing keys if needed.
 func LoadConfig() (Config, error) {
 	cfg := defaultConfig()
 	path := configPath()
 
-	// If file doesn't exist, write defaults and return them.
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		if err2 := SaveConfig(cfg); err2 != nil {
-			return cfg, err2
+		// First launch — write the full commented default.
+		if mkErr := os.MkdirAll(filepath.Dir(path), 0o750); mkErr != nil {
+			return cfg, mkErr
+		}
+		if wErr := writeConfigFile(path, cfg); wErr != nil {
+			return cfg, wErr
 		}
 		return cfg, nil
 	}
 
-	// Decode the TOML file into our Config struct.
+	// File exists — decode into cfg (missing fields keep their defaults).
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, err
 	}
+
+	// Migrate: if any key that ships with this version is absent from the
+	// file, rewrite with all keys while preserving the user's values.
+	if configNeedsMigration(path) {
+		_ = writeConfigFile(path, cfg) // non-fatal
+	}
+
 	return cfg, nil
 }
 
-// SaveConfig writes the config to the TOML file.
+// SaveConfig writes the current config back to disk (used after live-reload).
 func SaveConfig(cfg Config) error {
-	path := configPath()
-	if err := os.MkdirAll(filepath.Dir(path), 0750); err != nil {
+	return writeConfigFile(configPath(), cfg)
+}
+
+// configNeedsMigration returns true if the file is missing any of the keys
+// that ship with this version of teapi.
+func configNeedsMigration(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	s := string(data)
+	// Check for keys added after initial release.
+	required := []string{
+		"up =", "down =", "left =", "right =",
+		"enter =", "escape =", "space =",
+		"open_editor =", "open_response =",
+	}
+	for _, k := range required {
+		if !strings.Contains(s, k) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeConfigFile writes a fully-commented TOML file with the user's values
+// baked in. This produces a much more readable file than the TOML encoder
+// because it includes section headers and inline comments for every key.
+func writeConfigFile(path string, cfg Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
 		return err
 	}
 	f, err := os.Create(path)
@@ -117,33 +194,72 @@ func SaveConfig(cfg Config) error {
 		return err
 	}
 	defer f.Close()
-	return toml.NewEncoder(f).Encode(cfg)
+	_, err = f.WriteString(buildConfigTOML(cfg))
+	return err
+}
+
+// buildConfigTOML produces the full commented TOML string for writing.
+func buildConfigTOML(cfg Config) string {
+	k := cfg.Keys
+	ui := cfg.UI
+	q := func(s string) string { return `"` + s + `"` }
+	itoa := func(n int) string {
+		if n == 0 {
+			return "0"
+		}
+		s := ""
+		for n > 0 {
+			s = string(rune('0'+n%10)) + s
+			n /= 10
+		}
+		return s
+	}
+
+	return "# teapi configuration file\n" +
+		"# Edit any value below and press o inside teapi to reload it live.\n" +
+		"# Key names: letters, \"up\", \"down\", \"left\", \"right\", \"enter\", \"esc\",\n" +
+		"#             \"space\", \"tab\", \"shift+tab\", \"ctrl+x\", \"alt+x\", etc.\n" +
+		"\n" +
+		"[keys]\n" +
+		"\n" +
+		"# ── Navigation ─────────────────────────────────────────────────────────\n" +
+		"up           = " + q(k.Up) + "       # move cursor / scroll up\n" +
+		"down         = " + q(k.Down) + "     # move cursor / scroll down\n" +
+		"left         = " + q(k.Left) + "     # move left / focus workflow list\n" +
+		"right        = " + q(k.Right) + "    # move right / focus steps list\n" +
+		"enter        = " + q(k.Enter) + "    # confirm / enter edit mode\n" +
+		"escape       = " + q(k.Escape) + "   # cancel / exit edit mode\n" +
+		"space        = " + q(k.Space) + "    # toggle (e.g. enable/disable header)\n" +
+		"\n" +
+		"# ── Section cycling (Tab / Shift+Tab by default) ────────────────────────\n" +
+		"tab_next     = " + q(k.TabNext) + "  # go to next section\n" +
+		"tab_prev     = " + q(k.TabPrev) + "  # go to previous section\n" +
+		"\n" +
+		"# ── Actions ─────────────────────────────────────────────────────────────\n" +
+		"send_request = " + q(k.SendRequest) + "       # send HTTP request (or run workflow/batch)\n" +
+		"new_item     = " + q(k.NewItem) + "       # add new item in the focused section\n" +
+		"delete_item  = " + q(k.DeleteItem) + "       # delete selected item\n" +
+		"\n" +
+		"# ── Open in editor ──────────────────────────────────────────────────────\n" +
+		"open_editor   = " + q(k.OpenEditor) + "      # open request body in $EDITOR\n" +
+		"open_response = " + q(k.OpenResponse) + "      # open response body in $EDITOR (read-only)\n" +
+		"open_config   = " + q(k.OpenConfig) + "      # open this config file in $EDITOR\n" +
+		"\n" +
+		"# ── App-level ────────────────────────────────────────────────────────────\n" +
+		"quit         = " + q(k.Quit) + "       # quit teapi (Ctrl+C always works too)\n" +
+		"\n" +
+		"[ui]\n" +
+		"sidebar_width  = " + itoa(ui.SidebarWidth) + "   # width of the sidebar in columns\n" +
+		"response_split = " + itoa(ui.ResponseSplit) + "  # % of right panel height for request builder\n" +
+		"theme          = " + q(ui.Theme) + "     # colour theme (currently only \"dark\" is supported)\n"
 }
 
 // ── KeyMap ────────────────────────────────────────────────────────────────────
 //
-// KeyMap converts the raw string config into key.Binding values.
-// key.Binding is the bubbletea type for matching key presses in Update().
-// key.WithHelp adds the description shown in the help bar.
+// KeyMap converts ConfigKeys into key.Binding values used in Update().
 
 type KeyMap struct {
-	FocusSidebar  key.Binding
-	FocusBuilder  key.Binding
-	FocusResponse key.Binding
-	SendRequest   key.Binding
-	NewItem       key.Binding
-	DeleteItem    key.Binding
-	Workflows     key.Binding
-	Batch         key.Binding
-	GlobalVars    key.Binding
-	Quit          key.Binding
-	Help          key.Binding
-	TabNext       key.Binding
-	TabPrev       key.Binding
-	OpenEditor    key.Binding
-	OpenResponse  key.Binding
-	OpenConfig    key.Binding
-	// These are always fixed — not user-configurable.
+	// Navigation
 	Up     key.Binding
 	Down   key.Binding
 	Left   key.Binding
@@ -151,65 +267,89 @@ type KeyMap struct {
 	Enter  key.Binding
 	Escape key.Binding
 	Space  key.Binding
+
+	// Section cycling
+	TabNext key.Binding
+	TabPrev key.Binding
+
+	// Actions
+	SendRequest  key.Binding
+	NewItem      key.Binding
+	DeleteItem   key.Binding
+	OpenEditor   key.Binding
+	OpenResponse key.Binding
+	OpenConfig   key.Binding
+
+	// App-level
+	Quit key.Binding
+	Help key.Binding // unused but kept for compatibility
+
+	// Legacy — kept so old code referencing them doesn't break at compile time
+	FocusSidebar  key.Binding
+	FocusBuilder  key.Binding
+	FocusResponse key.Binding
+	Workflows     key.Binding
+	Batch         key.Binding
+	GlobalVars    key.Binding
 }
 
-// bindingFor returns a key.Binding for k, with optional extra always-active keys.
-// If k is empty, the binding has no keys (disabled).
-func bindingFor(k, help string, extra ...string) key.Binding {
+// bindingFor returns a key.Binding for the given key string.
+// If k is empty the binding is disabled (no keys).
+func bindingFor(k, helpText string) key.Binding {
+	if k == "" {
+		return key.NewBinding()
+	}
+	return key.NewBinding(key.WithKeys(k), key.WithHelp(k, helpText))
+}
+
+// bindingForWithExtra returns a binding for k plus additional always-active keys.
+func bindingForWithExtra(k, helpText string, extra ...string) key.Binding {
+	if k == "" && len(extra) == 0 {
+		return key.NewBinding()
+	}
 	keys := extra
 	if k != "" {
 		keys = append([]string{k}, extra...)
 	}
-	if len(keys) == 0 {
-		return key.NewBinding()
-	}
-	return key.NewBinding(key.WithKeys(keys...), key.WithHelp(k, help))
+	return key.NewBinding(key.WithKeys(keys...), key.WithHelp(k, helpText))
 }
 
 // NewKeyMap builds a KeyMap from a Config.
 func NewKeyMap(cfg Config) KeyMap {
 	k := cfg.Keys
 	return KeyMap{
-		// These are now unused as defaults (empty string) but kept for user rebinding.
-		FocusSidebar:  bindingFor(k.FocusSidebar, "focus sidebar"),
-		FocusBuilder:  bindingFor(k.FocusBuilder, "focus builder"),
-		FocusResponse: bindingFor(k.FocusResponse, "focus response"),
-		SendRequest:   bindingFor(k.SendRequest, "send request"),
-		NewItem:       bindingFor(k.NewItem, "new item"),
-		DeleteItem:    bindingFor(k.DeleteItem, "delete"),
-		Workflows:     bindingFor(k.Workflows, "workflows"),
-		Batch:         bindingFor(k.Batch, "batch"),
-		GlobalVars:    bindingFor(k.GlobalVars, "global vars"),
-		Quit:          bindingFor(k.Quit, "quit", "ctrl+c"),
-		Help:          bindingFor(k.Help, "toggle help"),
-		TabNext:       bindingFor(k.TabNext, "next section"),
-		TabPrev:       bindingFor(k.TabPrev, "prev section"),
-		OpenEditor:    bindingFor(k.OpenEditor, "edit body"),
-		OpenResponse:  bindingFor(k.OpenResponse, "view response"),
-		OpenConfig:    bindingFor(k.OpenConfig, "open config"),
-		// Fixed bindings — not user-configurable
-		Up:     key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:   key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Left:   key.NewBinding(key.WithKeys("left"), key.WithHelp("←", "left")),
-		Right:  key.NewBinding(key.WithKeys("right"), key.WithHelp("→", "right")),
-		Enter:  key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "confirm")),
-		Escape: key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "cancel")),
-		Space:  key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+		Up:           bindingFor(k.Up, "up"),
+		Down:         bindingFor(k.Down, "down"),
+		Left:         bindingFor(k.Left, "left"),
+		Right:        bindingFor(k.Right, "right"),
+		Enter:        bindingFor(k.Enter, "confirm"),
+		Escape:       bindingFor(k.Escape, "cancel"),
+		Space:        bindingFor(k.Space, "toggle"),
+		TabNext:      bindingFor(k.TabNext, "next section"),
+		TabPrev:      bindingFor(k.TabPrev, "prev section"),
+		SendRequest:  bindingFor(k.SendRequest, "send request"),
+		NewItem:      bindingFor(k.NewItem, "new item"),
+		DeleteItem:   bindingFor(k.DeleteItem, "delete"),
+		OpenEditor:   bindingFor(k.OpenEditor, "edit body"),
+		OpenResponse: bindingFor(k.OpenResponse, "view response"),
+		OpenConfig:   bindingFor(k.OpenConfig, "open config"),
+		Quit:         bindingForWithExtra(k.Quit, "quit", "ctrl+c"),
+		Help:         key.NewBinding(), // unused
 	}
 }
 
-// ShortHelp implements key.Map — shown when the help overlay is active.
+// ShortHelp implements key.Map.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.TabNext, k.TabPrev, k.SendRequest, k.Help, k.Quit}
+	return []key.Binding{k.TabNext, k.TabPrev, k.SendRequest, k.Quit}
 }
 
-// FullHelp implements key.Map — full two-column help.
+// FullHelp implements key.Map.
 func (k KeyMap) FullHelp() [][]key.Binding {
 	return [][]key.Binding{
+		{k.Up, k.Down, k.Left, k.Right},
 		{k.TabNext, k.TabPrev},
 		{k.SendRequest, k.NewItem, k.DeleteItem},
-		{k.Workflows, k.Batch, k.GlobalVars},
 		{k.OpenEditor, k.OpenResponse, k.OpenConfig},
-		{k.Help, k.Quit},
+		{k.Quit},
 	}
 }

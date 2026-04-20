@@ -282,6 +282,19 @@ func NewBatchScreen(batches []Batch, width, height int) BatchScreen {
 	}
 }
 
+// SetSize resizes the batch screen and its internal list.
+func (bs *BatchScreen) SetSize(width, height int) {
+	bs.width = width
+	bs.height = height
+	listH := height / 2
+	if listH < 2 {
+		listH = 2
+	}
+	bs.list.SetSize(width-4, listH)
+	bs.pathInput.SetWidth(width - 10)
+	bs.urlInput.SetWidth(width - 10)
+}
+
 // Update handles key events for the batch screen.
 func (bs BatchScreen) Update(msg tea.Msg, keys KeyMap, globalVars []Variable) (BatchScreen, tea.Cmd) {
 	var cmds []tea.Cmd
