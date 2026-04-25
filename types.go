@@ -265,6 +265,15 @@ type editorClosedMsg struct {
 	content string // the new content from the editor
 }
 
+// clipboardCopiedMsg is sent when content has been written to the clipboard.
+// label describes what was copied (e.g. "URL", "body", "response").
+type clipboardCopiedMsg struct {
+	label string
+}
+
+// clipboardClearMsg is sent after a short delay to clear the "Copied!" flash.
+type clipboardClearMsg struct{}
+
 // ── Collection CRUD messages ──────────────────────────────────────────────────
 //
 // These are sent by sidebar key handlers and consumed by the root model's Update.

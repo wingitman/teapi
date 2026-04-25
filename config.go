@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 
 	"charm.land/bubbles/v2/key"
@@ -41,6 +42,7 @@ type ConfigKeys struct {
 	SendRequest string `toml:"send_request"`
 	NewItem     string `toml:"new_item"`
 	DeleteItem  string `toml:"delete_item"`
+	CopyItem    string `toml:"copy_item"`
 
 	// ── Open in editor ───────────────────────────────────────────────────────
 	OpenEditor   string `toml:"open_editor"`
@@ -86,9 +88,10 @@ func defaultConfig() Config {
 			Space:        " ",
 			TabNext:      "tab",
 			TabPrev:      "shift+tab",
-			SendRequest:  "s",
-			NewItem:      "n",
-			DeleteItem:   "d",
+		SendRequest:  "s",
+		NewItem:      "n",
+		DeleteItem:   "d",
+		CopyItem:     "y",
 			OpenEditor:   "E",
 			OpenResponse: "R",
 			OpenConfig:   "o",
@@ -160,22 +163,26 @@ func SaveConfig(cfg Config) error {
 	return writeConfigFile(configPath(), cfg)
 }
 
-// configNeedsMigration returns true if the file is missing any of the keys
-// that ship with this version of teapi.
+// configNeedsMigration returns true if the file is missing any key that
+// ships with this version of teapi.
+//
+// It derives the required key names directly from the ConfigKeys struct's
+// TOML tags, so it stays in sync automatically whenever a new field is added.
+// Legacy fields tagged with omitempty are intentionally excluded — they are
+// kept for file-compatibility but are no longer written.
 func configNeedsMigration(path string) bool {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 	s := string(data)
-	// Check for keys added after initial release.
-	required := []string{
-		"up =", "down =", "left =", "right =",
-		"enter =", "escape =", "space =",
-		"open_editor =", "open_response =",
-	}
-	for _, k := range required {
-		if !strings.Contains(s, k) {
+	t := reflect.TypeOf(ConfigKeys{})
+	for i := range t.NumField() {
+		tag := t.Field(i).Tag.Get("toml")
+		if tag == "" || strings.Contains(tag, "omitempty") {
+			continue
+		}
+		if !strings.Contains(s, tag+" =") {
 			return true
 		}
 	}
@@ -239,6 +246,7 @@ func buildConfigTOML(cfg Config) string {
 		"send_request = " + q(k.SendRequest) + "       # send HTTP request (or run workflow/batch)\n" +
 		"new_item     = " + q(k.NewItem) + "       # add new item in the focused section\n" +
 		"delete_item  = " + q(k.DeleteItem) + "       # delete selected item\n" +
+		"copy_item    = " + q(k.CopyItem) + "       # copy focused content to clipboard\n" +
 		"\n" +
 		"# ── Open in editor ──────────────────────────────────────────────────────\n" +
 		"open_editor   = " + q(k.OpenEditor) + "      # open request body in $EDITOR\n" +
@@ -276,6 +284,7 @@ type KeyMap struct {
 	SendRequest  key.Binding
 	NewItem      key.Binding
 	DeleteItem   key.Binding
+	CopyItem     key.Binding
 	OpenEditor   key.Binding
 	OpenResponse key.Binding
 	OpenConfig   key.Binding
@@ -330,6 +339,7 @@ func NewKeyMap(cfg Config) KeyMap {
 		SendRequest:  bindingFor(k.SendRequest, "send request"),
 		NewItem:      bindingFor(k.NewItem, "new item"),
 		DeleteItem:   bindingFor(k.DeleteItem, "delete"),
+		CopyItem:     bindingFor(k.CopyItem, "copy to clipboard"),
 		OpenEditor:   bindingFor(k.OpenEditor, "edit body"),
 		OpenResponse: bindingFor(k.OpenResponse, "view response"),
 		OpenConfig:   bindingFor(k.OpenConfig, "open config"),

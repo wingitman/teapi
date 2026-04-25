@@ -11,6 +11,7 @@ import (
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/atotto/clipboard"
 )
 
 // ── Root model ────────────────────────────────────────────────────────────────
@@ -404,6 +405,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.builder.batchScreen, cmd = m.builder.batchScreen.Update(msg, m.keys, m.data.GlobalVars)
 		cmds = append(cmds, cmd)
 
+	// ── Paste (bracketed-paste / terminal paste) ─────────────────────────
+	case tea.PasteMsg:
+		if m.editMode {
+			cmds = append(cmds, m.routeKeyToPanel(msg))
+		}
+
+	// ── Clipboard feedback ────────────────────────────────────────────────
+	case clipboardCopiedMsg:
+		m.statusMsg = testPassStyle.Render("Copied " + msg.label + " to clipboard!")
+		cmds = append(cmds, tea.Tick(2*time.Second, func(_ time.Time) tea.Msg {
+			return clipboardClearMsg{}
+		}))
+
+	case clipboardClearMsg:
+		m.statusMsg = ""
+
 	// ── Key presses ───────────────────────────────────────────────────────
 	case tea.KeyPressMsg:
 		// Modal captures all keys first
@@ -434,6 +451,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				} else {
 					m.exitEditMode()
 					m.builder.activeTab = BuilderTabHeaders
+				}
+			case msg.String() == "ctrl+v":
+				// ctrl+v: read clipboard and synthesise a PasteMsg so the
+				// focused input's own PasteMsg handler does the insertion.
+				if str, err := clipboard.ReadAll(); err == nil {
+					cmd := m.routeKeyToPanel(tea.PasteMsg{Content: str})
+					cmds = append(cmds, cmd)
 				}
 			default:
 				cmd := m.routeKeyToPanel(msg)
@@ -582,6 +606,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, openEditorCmd(m.response.Body, false, ".json"))
 			}
 
+		// Copy focused content to clipboard
+		case key_matches(msg, m.keys.CopyItem):
+			cmds = append(cmds, m.copyFocusedContent())
+
 		// Single-letter fallback keys not in the main keymap
 		// (these are hardcoded UX shortcuts that don't warrant a config entry)
 		default:
@@ -656,6 +684,62 @@ func (m *Model) routeKeyToPanel(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+// ── Clipboard copy ────────────────────────────────────────────────────────────
+
+// copyFocusedContent copies the contextually relevant content to the system
+// clipboard and returns a cmd that delivers clipboardCopiedMsg to trigger
+// the "Copied!" status flash.
+//
+// Context:
+//   - Response panel focused → copy response body
+//   - Builder, Request tab   → copy URL
+//   - Builder, Headers tab   → copy selected header value
+//   - Builder, Body tab (Request tab body) → copy body (via URL+body logic)
+//   - Builder, Variables tab → copy selected variable value
+func (m *Model) copyFocusedContent() tea.Cmd {
+	var text, label string
+
+	switch m.focus {
+	case PanelResponse:
+		text = m.response.Body
+		label = "response"
+
+	case PanelBuilder:
+		switch m.builder.activeTab {
+		case BuilderTabRequest:
+			text = m.builder.urlInput.Value()
+			label = "URL"
+
+		case BuilderTabHeaders:
+			if m.builder.headerCursor < len(m.builder.headers) {
+				h := m.builder.headers[m.builder.headerCursor]
+				text = h.Value
+				label = "header value"
+			}
+
+		case BuilderTabVariables:
+			if m.builder.varInGlobal {
+				if m.builder.varCursor < len(m.builder.globalVars) {
+					text = m.builder.globalVars[m.builder.varCursor].Value
+					label = "variable value"
+				}
+			} else {
+				if m.builder.varCursor < len(m.builder.variables) {
+					text = m.builder.variables[m.builder.varCursor].Value
+					label = "variable value"
+				}
+			}
+		}
+	}
+
+	if text == "" {
+		return nil
+	}
+
+	_ = clipboard.WriteAll(text)
+	return func() tea.Msg { return clipboardCopiedMsg{label: label} }
 }
 
 // ── Modal openers ─────────────────────────────────────────────────────────────
@@ -1242,6 +1326,7 @@ func (m Model) buildHintBar() string {
 				ctx = hint(m.keys.Enter, "edit URL") +
 					hint(m.keys.Left, "prev method") +
 					hint(m.keys.Right, "next method") +
+					hint(m.keys.CopyItem, "copy URL") +
 					hint(m.keys.OpenEditor, "open body in editor")
 			}
 		case BuilderTabHeaders:
@@ -1249,12 +1334,14 @@ func (m Model) buildHintBar() string {
 				hint(m.keys.NewItem, "add") +
 				hintKeyStyle.Render("e") + hintStyle.Render(":edit  ") +
 				hint(m.keys.DeleteItem, "delete") +
+				hint(m.keys.CopyItem, "copy value") +
 				hint(m.keys.Space, "toggle")
 		case BuilderTabVariables:
 			ctx = nav +
 				hint(m.keys.NewItem, "add local") +
 				hintKeyStyle.Render("N") + hintStyle.Render(":add global  ") +
-				hint(m.keys.DeleteItem, "delete")
+				hint(m.keys.DeleteItem, "delete") +
+				hint(m.keys.CopyItem, "copy value")
 		case BuilderTabTests:
 			ctx = nav +
 				hint(m.keys.NewItem, "add") +
@@ -1283,6 +1370,7 @@ func (m Model) buildHintBar() string {
 
 	case PanelResponse:
 		ctx = nav +
+			hint(m.keys.CopyItem, "copy response") +
 			hint(m.keys.OpenResponse, "open in editor")
 	}
 

@@ -6,10 +6,10 @@ require (
 	charm.land/bubbletea/v2 v2.0.2
 	charm.land/lipgloss/v2 v2.0.2
 	github.com/BurntSushi/toml v1.6.0
+	github.com/atotto/clipboard v0.1.4
 )
 
 require (
-	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/sahilm/fuzzy v0.1.1 // indirect
 )
 
