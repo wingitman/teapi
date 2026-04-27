@@ -37,10 +37,12 @@ type BuilderPanel struct {
 	activeTab BuilderTab
 
 	// Request tab
-	methodIdx  int
-	urlInput   textinput.Model
-	bodyInput  textarea.Model
-	innerFocus BuilderFocus
+	methodIdx    int
+	urlInput     textinput.Model
+	bodyInput    textarea.Model
+	innerFocus   BuilderFocus
+	urlSnapshot  string // value at edit-entry time, restored on Esc
+	bodySnapshot string // value at edit-entry time, restored on Esc
 
 	// Headers tab
 	headers      []Header

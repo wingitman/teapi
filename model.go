@@ -436,10 +436,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
-		// ── Edit mode: Esc and Tab are intercepted; everything else types ──────
+		// ── Edit mode: Esc, Enter, and Tab are intercepted; everything else types ──
 		if m.editMode {
 			switch {
 			case key_matches(msg, m.keys.Escape):
+				// Revert to the snapshotted values and exit.
+				m.builder.urlInput.SetValue(m.builder.urlSnapshot)
+				m.builder.bodyInput.SetValue(m.builder.bodySnapshot)
+				m.exitEditMode()
+			case key_matches(msg, m.keys.Enter) && m.builder.innerFocus == BuilderFocusURL:
+				// Confirm URL edit and exit edit mode.
 				m.exitEditMode()
 			case key_matches(msg, m.keys.TabNext):
 				// Tab from URL → Body; Tab from Body → exit edit + next section
@@ -486,7 +492,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Up / Down — list navigation and response scrolling
 		case key_matches(msg, m.keys.Up) || key_matches(msg, m.keys.Down):
-			cmds = append(cmds, m.routeKeyToPanel(msg))
+			// On the Request tab, Up/Down moves the field selection cursor
+			// (URL ↔ Body) instead of navigating a list.
+			if m.focus == PanelBuilder && m.builder.activeTab == BuilderTabRequest {
+				if key_matches(msg, m.keys.Up) {
+					m.builder.innerFocus = BuilderFocusURL
+				} else {
+					m.builder.innerFocus = BuilderFocusBody
+				}
+			} else {
+				cmds = append(cmds, m.routeKeyToPanel(msg))
+			}
 
 		// Left / Right — cycle method on Request tab; switch workflow panels elsewhere
 		case key_matches(msg, m.keys.Left) || key_matches(msg, m.keys.Right):
@@ -510,10 +526,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.routeKeyToPanel(msg))
 			case PanelBuilder:
 				if m.builder.activeTab == BuilderTabRequest {
+					// Snapshot current values so Esc can revert them.
+					m.builder.urlSnapshot = m.builder.urlInput.Value()
+					m.builder.bodySnapshot = m.builder.bodyInput.Value()
 					m.editMode = true
-					m.builder.innerFocus = BuilderFocusURL
-					cmd := m.builder.urlInput.Focus()
-					cmds = append(cmds, cmd)
+					// Focus whichever field the cursor is already on.
+					if m.builder.innerFocus == BuilderFocusBody {
+						cmd := m.builder.bodyInput.Focus()
+						cmds = append(cmds, cmd)
+					} else {
+						m.builder.innerFocus = BuilderFocusURL
+						cmd := m.builder.urlInput.Focus()
+						cmds = append(cmds, cmd)
+					}
 				}
 			}
 
@@ -1316,18 +1341,20 @@ func (m Model) buildHintBar() string {
 		switch m.builder.activeTab {
 		case BuilderTabRequest:
 			if m.editMode && m.builder.innerFocus == BuilderFocusBody {
-				ctx = hint(m.keys.Escape, "exit body") +
+				ctx = hint(m.keys.Escape, "revert & exit") +
 					hint(m.keys.TabNext, "next section")
 			} else if m.editMode && m.builder.innerFocus == BuilderFocusURL {
-				ctx = hint(m.keys.Escape, "exit URL") +
+				ctx = hint(m.keys.Enter, "confirm") +
+					hint(m.keys.Escape, "revert") +
 					hint(m.keys.TabNext, "edit body") +
 					hint(m.keys.OpenEditor, "open in editor")
 			} else {
-				ctx = hint(m.keys.Enter, "edit URL") +
+				ctx = hint(m.keys.Up, "URL") +
+					hint(m.keys.Down, "body") +
+					hint(m.keys.Enter, "edit selected") +
 					hint(m.keys.Left, "prev method") +
 					hint(m.keys.Right, "next method") +
-					hint(m.keys.CopyItem, "copy URL") +
-					hint(m.keys.OpenEditor, "open body in editor")
+					hint(m.keys.CopyItem, "copy URL")
 			}
 		case BuilderTabHeaders:
 			ctx = nav +
