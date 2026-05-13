@@ -265,30 +265,27 @@ func (sp *SidebarPanel) CurrentRequestID() string {
 
 func (sp SidebarPanel) View(focused bool) string {
 	var sb strings.Builder
-	innerWidth := sp.width - 4 // account for border
+	innerWidth := sp.renderWidth()
+	renderedRows := 0
 
-	visible := sp.nodes
-	start := sp.offset
-	end := sp.offset + sp.height
-	if end > len(visible) {
-		end = len(visible)
-	}
+	for idx := sp.offset; idx < len(sp.nodes) && renderedRows < sp.height; idx++ {
+		node := sp.nodes[idx]
+		line := sp.renderNode(node, idx == sp.cursor, innerWidth)
+		height := visualHeight(line)
+		if renderedRows+height > sp.height {
+			break
+		}
 
-	for i, node := range visible[start:end] {
-		absIdx := start + i
-		selected := absIdx == sp.cursor
-
-		line := sp.renderNode(node, selected, innerWidth)
 		sb.WriteString(line)
 		sb.WriteString("\n")
+		renderedRows += height
 	}
 
 	// Pad remaining space
 	rendered := sb.String()
-	lines := strings.Count(rendered, "\n")
-	for lines < sp.height {
+	for renderedRows < sp.height {
 		rendered += "\n"
-		lines++
+		renderedRows++
 	}
 
 	border := panelBlurredStyle
@@ -321,10 +318,6 @@ func (sp SidebarPanel) renderNode(node SidebarNode, selected bool, width int) st
 	}
 
 	label := indent + prefix + node.Label
-	// Truncate to fit
-	if len(label) > width {
-		label = label[:width-1] + "…"
-	}
 
 	if selected {
 		return sidebarSelectedStyle.Width(width).Render(label)
@@ -335,6 +328,39 @@ func (sp SidebarPanel) renderNode(node SidebarNode, selected bool, width int) st
 	default:
 		return sidebarItemStyle.Width(width).Render(label)
 	}
+}
+
+func (sp SidebarPanel) visualNodeAt(row int) (int, bool) {
+	if row < 0 || row >= sp.height {
+		return 0, false
+	}
+	renderedRows := 0
+	for idx := sp.offset; idx < len(sp.nodes) && renderedRows < sp.height; idx++ {
+		height := sp.nodeVisualHeight(sp.nodes[idx])
+		if renderedRows+height > sp.height {
+			break
+		}
+		if row >= renderedRows && row < renderedRows+height {
+			return idx, true
+		}
+		renderedRows += height
+	}
+	return 0, false
+}
+
+func (sp SidebarPanel) nodeVisualHeight(node SidebarNode) int {
+	return visualHeight(sp.renderNode(node, false, sp.renderWidth()))
+}
+
+func (sp SidebarPanel) renderWidth() int {
+	return max(1, sp.width-4)
+}
+
+func visualHeight(s string) int {
+	if s == "" {
+		return 1
+	}
+	return strings.Count(s, "\n") + 1
 }
 
 // ── URL shortener ─────────────────────────────────────────────────────────────

@@ -411,6 +411,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.routeKeyToPanel(msg))
 		}
 
+	case tea.MouseWheelMsg:
+		cmds = append(cmds, m.handleMouseWheel(msg))
+
+	case tea.MouseClickMsg:
+		cmds = append(cmds, m.handleMouseClick(msg))
+
 	// ── Clipboard feedback ────────────────────────────────────────────────
 	case clipboardCopiedMsg:
 		m.statusMsg = testPassStyle.Render("Copied " + msg.label + " to clipboard!")
@@ -526,19 +532,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.routeKeyToPanel(msg))
 			case PanelBuilder:
 				if m.builder.activeTab == BuilderTabRequest {
-					// Snapshot current values so Esc can revert them.
-					m.builder.urlSnapshot = m.builder.urlInput.Value()
-					m.builder.bodySnapshot = m.builder.bodyInput.Value()
-					m.editMode = true
-					// Focus whichever field the cursor is already on.
-					if m.builder.innerFocus == BuilderFocusBody {
-						cmd := m.builder.bodyInput.Focus()
-						cmds = append(cmds, cmd)
-					} else {
-						m.builder.innerFocus = BuilderFocusURL
-						cmd := m.builder.urlInput.Focus()
-						cmds = append(cmds, cmd)
-					}
+					cmds = append(cmds, m.enterBuilderEditMode(m.builder.innerFocus))
 				}
 			}
 
@@ -709,6 +703,170 @@ func (m *Model) routeKeyToPanel(msg tea.Msg) tea.Cmd {
 		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
+}
+
+func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) tea.Cmd {
+	if m.modal != nil || m.editMode {
+		return nil
+	}
+	e := msg.Mouse()
+	m.focus = m.panelAt(e.X, e.Y)
+	if m.focus == PanelResponse {
+		updated, cmd := m.response.Update(msg, m.keys)
+		m.response = updated
+		return cmd
+	}
+	if m.focus == PanelSidebar {
+		if e.Button == tea.MouseWheelUp {
+			m.sidebar.moveCursor(-1)
+		} else if e.Button == tea.MouseWheelDown {
+			m.sidebar.moveCursor(1)
+		}
+	}
+	return nil
+}
+
+func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
+	if m.modal != nil || msg.Button != tea.MouseLeft {
+		return nil
+	}
+	e := msg.Mouse()
+	m.focus = m.panelAt(e.X, e.Y)
+	switch m.focus {
+	case PanelSidebar:
+		return m.handleSidebarMouseClick(e.X, e.Y)
+	case PanelBuilder:
+		return m.handleBuilderMouseClick(e.X, e.Y)
+	default:
+		return nil
+	}
+}
+
+func (m *Model) handleSidebarMouseClick(x, y int) tea.Cmd {
+	_, row, ok := m.sidebarContentPos(x, y)
+	if !ok {
+		return nil
+	}
+	idx, ok := m.sidebar.visualNodeAt(row)
+	if !ok {
+		return nil
+	}
+	if idx < 0 || idx >= len(m.sidebar.nodes) || m.sidebar.nodes[idx].Depth < 0 {
+		return nil
+	}
+	if idx == m.sidebar.cursor {
+		updated, cmd := m.sidebar.handleEnter(m.data)
+		m.sidebar = updated
+		return cmd
+	}
+	m.sidebar.cursor = idx
+	m.sidebar.moveCursor(0)
+	return nil
+}
+
+func (m *Model) handleBuilderMouseClick(x, y int) tea.Cmd {
+	col, row, ok := m.builderContentPos(x, y)
+	if !ok {
+		return nil
+	}
+
+	if row == builderTabRow {
+		if tab, ok := builderTabAt(col); ok {
+			if m.editMode {
+				m.exitEditMode()
+			}
+			m.builder.activeTab = tab
+		}
+		return nil
+	}
+
+	if m.builder.activeTab != BuilderTabRequest {
+		return nil
+	}
+
+	switch {
+	case row == builderMethodRow:
+		if idx, ok := builderMethodAt(col); ok {
+			if m.editMode {
+				m.exitEditMode()
+			}
+			m.builder.methodIdx = idx
+		}
+	case row == builderURLRow:
+		return m.enterBuilderEditMode(BuilderFocusURL)
+	case row >= builderBodyLabelRow:
+		return m.enterBuilderEditMode(BuilderFocusBody)
+	}
+	return nil
+}
+
+func (m *Model) sidebarContentPos(x, y int) (int, int, bool) {
+	if x <= 0 || x >= m.sidebar.width+1 {
+		return 0, 0, false
+	}
+	row := y - titleBarHeight - 1
+	if row < 0 || row >= m.sidebar.height {
+		return 0, 0, false
+	}
+	return x - 1, row, true
+}
+
+func (m *Model) builderContentPos(x, y int) (int, int, bool) {
+	left := m.sidebar.width + 2
+	if x <= left || x >= left+m.builder.width+1 {
+		return 0, 0, false
+	}
+	row := y - titleBarHeight - 1
+	if row < 0 || row >= m.builder.height {
+		return 0, 0, false
+	}
+	return x - left - 1, row, true
+}
+
+const (
+	builderTabRow       = 0
+	builderMethodRow    = 2
+	builderURLRow       = 4
+	builderBodyLabelRow = 6
+)
+
+func builderTabAt(col int) (BuilderTab, bool) {
+	names := []string{"Request", "Headers", "Variables", "Tests", "Workflows", "Batch"}
+	pos := 0
+	for i, name := range names {
+		width := len(name) + 2 // both tab styles add one cell of horizontal padding
+		if col >= pos && col < pos+width {
+			return BuilderTab(i), true
+		}
+		pos += width + 2 // renderTabBar joins tabs with two spaces
+	}
+	return BuilderTabRequest, false
+}
+
+func builderMethodAt(col int) (int, bool) {
+	pos := len("Method: ")
+	for i, method := range httpMethods {
+		width := len(method) + 2 // method badges add one cell of horizontal padding
+		if col >= pos && col < pos+width {
+			return i, true
+		}
+		pos += width + 1 // renderRequestTab appends one plain space after each badge
+	}
+	return 0, false
+}
+
+func (m *Model) panelAt(x, y int) Panel {
+	if y <= 0 {
+		return m.focus
+	}
+	if x < m.sidebar.width+2 {
+		return PanelSidebar
+	}
+	contentY := y - titleBarHeight
+	if contentY < m.builder.height+2 {
+		return PanelBuilder
+	}
+	return PanelResponse
 }
 
 // ── Clipboard copy ────────────────────────────────────────────────────────────
@@ -1181,6 +1339,22 @@ func (m *Model) exitEditMode() {
 	m.builder.innerFocus = BuilderFocusURL
 }
 
+func (m *Model) enterBuilderEditMode(focus BuilderFocus) tea.Cmd {
+	if !m.editMode {
+		m.builder.urlSnapshot = m.builder.urlInput.Value()
+		m.builder.bodySnapshot = m.builder.bodyInput.Value()
+	}
+	m.editMode = true
+	m.builder.urlInput.Blur()
+	m.builder.bodyInput.Blur()
+	m.builder.innerFocus = focus
+	if focus == BuilderFocusBody {
+		return m.builder.bodyInput.Focus()
+	}
+	m.builder.innerFocus = BuilderFocusURL
+	return m.builder.urlInput.Focus()
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 // saveCurrentRequest saves the builder's current state back to AppData.
@@ -1251,6 +1425,7 @@ func (m Model) View() tea.View {
 	if m.width == 0 {
 		v := tea.NewView("Loading...")
 		v.AltScreen = true
+		v.MouseMode = tea.MouseModeCellMotion
 		return v
 	}
 
@@ -1263,6 +1438,7 @@ func (m Model) View() tea.View {
 
 	v := tea.NewView(screen)
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	return v
 }
 
