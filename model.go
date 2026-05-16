@@ -59,6 +59,14 @@ type Model struct {
 
 	// Status bar message (transient)
 	statusMsg string
+
+	// Update state
+	updateInfo     UpdateInfo
+	updateChecking bool
+	updatePrompt   bool
+	updateScreen   bool
+	updateCursor   int
+	updateExpanded map[string]bool
 }
 
 // ── Sizing constants ──────────────────────────────────────────────────────────
@@ -74,6 +82,10 @@ func NewModel() (Model, error) {
 	if err != nil {
 		cfg = defaultConfig()
 	}
+	if Commit != "" && Commit != "dev" && cfg.Updates.CurrentCommit != Commit {
+		cfg.Updates.CurrentCommit = Commit
+		_ = RecordUpdateMetadata(Commit, cfg.Updates.RepoPath)
+	}
 
 	data, err := LoadData()
 	if err != nil {
@@ -83,11 +95,13 @@ func NewModel() (Model, error) {
 	keys := NewKeyMap(cfg)
 
 	m := Model{
-		cfg:   cfg,
-		keys:  keys,
-		data:  data,
-		focus: PanelBuilder,
+		cfg:            cfg,
+		keys:           keys,
+		data:           data,
+		focus:          PanelBuilder,
+		updateExpanded: map[string]bool{},
 	}
+	m.updateChecking = !cfg.Updates.DisableChecks
 
 	// Panels will be properly sized on the first WindowSizeMsg.
 	// Give them a reasonable default so they don't panic before then.
@@ -115,7 +129,12 @@ func NewModel() (Model, error) {
 // ── Init ──────────────────────────────────────────────────────────────────────
 
 func (m Model) Init() tea.Cmd {
-	return textinput_Blink()
+	cmds := []tea.Cmd{textinput_Blink()}
+	if !m.cfg.Updates.DisableChecks {
+		m.updateChecking = true
+		cmds = append(cmds, checkUpdatesCmd(m.cfg))
+	}
+	return tea.Batch(cmds...)
 }
 
 // textinput_Blink is a thin wrapper to avoid import collisions.
@@ -194,6 +213,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cfg = msg.cfg
 		m.keys = NewKeyMap(msg.cfg)
 		m.statusMsg = dimStyle.Render("Config reloaded.")
+
+	case updateCheckMsg:
+		m.updateChecking = false
+		m.updateInfo = msg.info
+		if msg.info.CheckError != "" {
+			m.statusMsg = errorStyle.Render("Update check failed: " + msg.info.CheckError)
+			break
+		}
+		if len(msg.info.Available) > 0 {
+			m.updateCursor = 0
+			m.updatePrompt = !m.updateScreen
+			m.statusMsg = testPassStyle.Render(fmt.Sprintf("%d update(s) available", len(msg.info.Available)))
+		} else if m.updateScreen {
+			m.statusMsg = dimStyle.Render("No updates found.")
+		}
+
+	case updateLaunchMsg:
+		if msg.err != "" {
+			m.updatePrompt = false
+			m.statusMsg = errorStyle.Render("Update launch failed: " + msg.err)
+			break
+		}
+		return m, tea.Quit
 
 	// ── Sidebar selections ────────────────────────────────────────────────
 	case SidebarSelectMsg:
@@ -442,6 +484,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(cmds...)
 		}
 
+		if m.updatePrompt {
+			switch msg.String() {
+			case "y", "Y":
+				cmds = append(cmds, m.launchUpdate(true, ""))
+			case "enter":
+				m.toggleSelectedUpdateDetails()
+			case "esc", "n", "N":
+				m.updatePrompt = false
+			}
+			if key_matches(msg, m.keys.Up) {
+				m.updateCursor--
+				m.clampUpdateCursor()
+			} else if key_matches(msg, m.keys.Down) {
+				m.updateCursor++
+				m.clampUpdateCursor()
+			} else if key_matches(msg, m.keys.Left) || key_matches(msg, m.keys.Right) {
+				m.toggleSelectedUpdateDetails()
+			}
+			return m, tea.Batch(cmds...)
+		}
+
+		if m.updateScreen {
+			switch {
+			case msg.String() == "esc" || key_matches(msg, m.keys.Quit) || key_matches(msg, m.keys.ShowUpdates):
+				m.updateScreen = false
+			case key_matches(msg, m.keys.Up):
+				m.updateCursor--
+				m.clampUpdateCursor()
+			case key_matches(msg, m.keys.Down):
+				m.updateCursor++
+				m.clampUpdateCursor()
+			case key_matches(msg, m.keys.Enter) || key_matches(msg, m.keys.Left) || key_matches(msg, m.keys.Right):
+				m.toggleSelectedUpdateDetails()
+			case key_matches(msg, m.keys.SendRequest):
+				m.updateChecking = true
+				cmds = append(cmds, checkUpdatesCmd(m.cfg))
+			case key_matches(msg, m.keys.OpenEditor):
+				if c := m.selectedUpdateCommit(); c != nil {
+					cmds = append(cmds, m.launchUpdate(false, c.Hash))
+				}
+			case msg.String() == "y" || msg.String() == "Y":
+				cmds = append(cmds, m.launchUpdate(true, ""))
+			}
+			return m, tea.Batch(cmds...)
+		}
+
 		// ── Edit mode: Esc, Enter, and Tab are intercepted; everything else types ──
 		if m.editMode {
 			switch {
@@ -601,6 +689,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Open config in editor
 		case key_matches(msg, m.keys.OpenConfig):
 			cmds = append(cmds, openConfigCmd())
+
+		// Show update history/installers
+		case key_matches(msg, m.keys.ShowUpdates):
+			m.updateScreen = true
+			m.updatePrompt = false
+			m.updateCursor = 0
+			if m.updateInfo.RepoPath == "" && !m.updateChecking && !m.cfg.Updates.DisableChecks {
+				m.updateChecking = true
+				cmds = append(cmds, checkUpdatesCmd(m.cfg))
+			}
 
 		// Open in editor — context-sensitive
 		case key_matches(msg, m.keys.OpenEditor):
@@ -1430,10 +1528,16 @@ func (m Model) View() tea.View {
 	}
 
 	screen := m.renderNormalLayout()
+	if m.updateScreen {
+		screen = m.renderUpdatesScreen()
+	}
 
 	// Modal composited on top
 	if m.modal != nil {
 		screen = OverlayModal(screen, m.modal.View(), m.width, m.height)
+	}
+	if m.updatePrompt {
+		screen = OverlayModal(screen, m.renderUpdatePrompt(), m.width, m.height)
 	}
 
 	v := tea.NewView(screen)
@@ -1459,7 +1563,7 @@ func (m Model) renderNormalLayout() string {
 	soft := lipgloss.NewStyle().Foreground(lipgloss.Color("#5865F2")).Bold(true).Render("soft")
 	appName := lipgloss.NewStyle().Foreground(colGray).Render(" / teapi")
 	brand := " " + delby + soft + appName + " "
-	rightHints := dimStyle.Render("o:config  q:quit")
+	rightHints := dimStyle.Render("o:config  U:updates  q:quit")
 	pad := m.width - lipgloss.Width(brand) - lipgloss.Width(rightHints)
 	if pad < 0 {
 		pad = 0
@@ -1496,6 +1600,7 @@ func (m Model) buildHintBar() string {
 	global := hint(m.keys.TabNext, "next section") +
 		hint(m.keys.TabPrev, "prev section") +
 		hint(m.keys.SendRequest, "send") +
+		hint(m.keys.ShowUpdates, "updates") +
 		hint(m.keys.Quit, "quit")
 
 	// Context line — changes based on focus + state.
@@ -1596,9 +1701,226 @@ type addTestMsg struct {
 	jsonPath string
 }
 
+type updateCheckMsg struct {
+	info UpdateInfo
+}
+
+type updateLaunchMsg struct {
+	err string
+}
+
 // now returns the current time.
 func now() time.Time {
 	return time.Now()
+}
+
+// ── Updates ──────────────────────────────────────────────────────────────────
+
+func checkUpdatesCmd(cfg Config) tea.Cmd {
+	return func() tea.Msg {
+		return updateCheckMsg{info: CheckUpdates(&cfg, Commit, 20)}
+	}
+}
+
+func (m Model) launchUpdate(latest bool, targetCommit string) tea.Cmd {
+	if latest && targetCommit == "" {
+		targetCommit = m.updateInfo.LatestCommit
+	}
+	repoPath := m.updateInfo.RepoPath
+	if repoPath == "" {
+		repoPath = m.cfg.Updates.RepoPath
+	}
+	recorder, _ := os.Executable()
+	req := UpdateInstallRequest{
+		RepoPath:       repoPath,
+		TargetCommit:   targetCommit,
+		Latest:         latest,
+		Terminal:       m.cfg.Updates.Terminal,
+		RecorderBinary: recorder,
+	}
+	return func() tea.Msg {
+		if err := LaunchDetachedUpdate(req); err != nil {
+			return updateLaunchMsg{err: err.Error()}
+		}
+		return updateLaunchMsg{}
+	}
+}
+
+func (m *Model) updateCommits() []UpdateCommit {
+	if len(m.updateInfo.Available) > 0 {
+		return m.updateInfo.Available
+	}
+	return m.updateInfo.History
+}
+
+func (m *Model) selectedUpdateCommit() *UpdateCommit {
+	commits := m.updateCommits()
+	if len(commits) == 0 || m.updateCursor < 0 || m.updateCursor >= len(commits) {
+		return nil
+	}
+	return &commits[m.updateCursor]
+}
+
+func (m *Model) clampUpdateCursor() {
+	commits := m.updateCommits()
+	if len(commits) == 0 {
+		m.updateCursor = 0
+		return
+	}
+	if m.updateCursor < 0 {
+		m.updateCursor = 0
+	}
+	if m.updateCursor >= len(commits) {
+		m.updateCursor = len(commits) - 1
+	}
+}
+
+func (m *Model) toggleSelectedUpdateDetails() {
+	c := m.selectedUpdateCommit()
+	if c == nil {
+		return
+	}
+	if m.updateExpanded == nil {
+		m.updateExpanded = map[string]bool{}
+	}
+	m.updateExpanded[c.Hash] = !m.updateExpanded[c.Hash]
+}
+
+func (m Model) renderUpdatePrompt() string {
+	commits := m.updateInfo.Available
+	rows := len(commits)
+	if rows > 5 {
+		rows = 5
+	}
+	start := m.updateCursor - rows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+rows > len(commits) {
+		start = len(commits) - rows
+		if start < 0 {
+			start = 0
+		}
+	}
+	var b strings.Builder
+	b.WriteString(testPassStyle.Render("Update available"))
+	b.WriteString("\n\n")
+	b.WriteString("Current: " + shortCommit(m.updateInfo.CurrentCommit) + "\n")
+	b.WriteString("Latest:  " + shortCommit(m.updateInfo.LatestCommit) + "\n")
+	if m.updateInfo.Branch != "" {
+		b.WriteString("Branch:  " + m.updateInfo.Branch + " -> " + m.updateInfo.Upstream + "\n")
+	}
+	b.WriteString("\nRecent changes:\n")
+	for i := start; i < start+rows && i < len(commits); i++ {
+		c := commits[i]
+		prefix := "  "
+		if i == m.updateCursor {
+			prefix = "> "
+		}
+		line := fmt.Sprintf("%s%s %s", prefix, c.Short, c.Subject)
+		if i == m.updateCursor {
+			line = tableSelectedStyle.Render(line)
+		}
+		b.WriteString(line + "\n")
+		if m.updateExpanded[c.Hash] && c.Body != "" {
+			b.WriteString(dimStyle.Render(indentLines(c.Body, "    ")) + "\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(dimStyle.Render("y install in new terminal and exit · enter show/hide details · n/esc skip"))
+	return panelFocusedStyle.Width(minInt(m.width-8, 84)).Padding(1, 2).Render(b.String())
+}
+
+func (m Model) renderUpdatesScreen() string {
+	var b strings.Builder
+	b.WriteString(" teapi / updates\n\n")
+	if m.updateChecking {
+		b.WriteString(dimStyle.Render("Checking for updates..."))
+		return b.String()
+	}
+	if m.updateInfo.CheckError != "" {
+		b.WriteString(errorStyle.Render("Check failed: ") + m.updateInfo.CheckError)
+		return b.String()
+	}
+	if m.updateInfo.RepoPath == "" {
+		b.WriteString(dimStyle.Render("No update information loaded."))
+		if m.cfg.Updates.DisableChecks {
+			b.WriteString("\n" + dimStyle.Render("Startup update checks are disabled in config."))
+		}
+		return b.String()
+	}
+	b.WriteString(dimStyle.Render("Repo: ") + m.updateInfo.RepoPath + "\n")
+	b.WriteString(dimStyle.Render("Branch: ") + m.updateInfo.Branch + " -> " + m.updateInfo.Upstream + "\n")
+	b.WriteString(dimStyle.Render("Current: ") + shortCommit(m.updateInfo.CurrentCommit) + "\n")
+	b.WriteString(dimStyle.Render("Latest: ") + shortCommit(m.updateInfo.LatestCommit) + "\n\n")
+
+	commits := m.updateCommits()
+	if len(commits) == 0 {
+		b.WriteString(testPassStyle.Render("No newer commits found."))
+		b.WriteString("\n\n" + dimStyle.Render("s refresh · esc close"))
+		return b.String()
+	}
+	if len(m.updateInfo.Available) > 0 {
+		b.WriteString(testPassStyle.Render(fmt.Sprintf("%d update(s) available", len(m.updateInfo.Available))) + "\n")
+	} else {
+		b.WriteString(dimStyle.Render("Recent history") + "\n")
+	}
+
+	rows := m.height - 12
+	if rows < 1 {
+		rows = 1
+	}
+	if rows > len(commits) {
+		rows = len(commits)
+	}
+	start := m.updateCursor - rows/2
+	if start < 0 {
+		start = 0
+	}
+	if start+rows > len(commits) {
+		start = len(commits) - rows
+		if start < 0 {
+			start = 0
+		}
+	}
+	for i := start; i < start+rows && i < len(commits); i++ {
+		c := commits[i]
+		line := fmt.Sprintf("  %s  %s  %s", c.Short, c.Date, c.Subject)
+		if i == m.updateCursor {
+			line = tableSelectedStyle.Render(line)
+		}
+		b.WriteString(line + "\n")
+		if m.updateExpanded[c.Hash] && c.Body != "" {
+			b.WriteString(dimStyle.Render(indentLines(c.Body, "    ")) + "\n")
+		}
+	}
+	b.WriteString("\n" + dimStyle.Render("y install latest · E install selected · enter details · s refresh · esc close"))
+	return b.String()
+}
+
+func shortCommit(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}
+
+func indentLines(s, prefix string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := range lines {
+		lines[i] = prefix + lines[i]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // ── Config editor ─────────────────────────────────────────────────────────────

@@ -29,7 +29,7 @@ type Group struct {
 	Vars     []Variable `json:"vars,omitempty"`     // group-level variables
 	Requests []Request  `json:"requests"`
 	Groups   []Group    `json:"groups,omitempty"` // one level of sub-groups
-	Expanded bool       `json:"-"` // UI state only, not persisted
+	Expanded bool       `json:"-"`                // UI state only, not persisted
 }
 
 // Request is a saved HTTP request with all its configuration.
@@ -65,8 +65,8 @@ type Variable struct {
 // TestCase is a single assertion that runs after a request completes.
 type TestCase struct {
 	Name     string `json:"name"`
-	Type     string `json:"type"`              // see assertion types below
-	Expected string `json:"expected"`           // expected value (string form)
+	Type     string `json:"type"`                // see assertion types below
+	Expected string `json:"expected"`            // expected value (string form)
 	JSONPath string `json:"json_path,omitempty"` // for jsonpath_equals type
 }
 
@@ -80,10 +80,10 @@ type TestResult struct {
 
 // Assertion type constants — these are the values for TestCase.Type.
 const (
-	AssertStatusEquals  = "status_equals"
-	AssertBodyContains  = "body_contains"
-	AssertBodyEquals    = "body_equals"
-	AssertHeaderEquals  = "header_equals"
+	AssertStatusEquals   = "status_equals"
+	AssertBodyContains   = "body_contains"
+	AssertBodyEquals     = "body_equals"
+	AssertHeaderEquals   = "header_equals"
 	AssertJSONPathEquals = "jsonpath_equals"
 )
 
@@ -112,7 +112,7 @@ type Workflow struct {
 // runs, the extracted value is stored as a variable for subsequent steps.
 type WorkflowStep struct {
 	RequestID   string            `json:"request_id"`
-	Mode        string            `json:"mode"`                  // "sequential" | "parallel"
+	Mode        string            `json:"mode"`                   // "sequential" | "parallel"
 	ExtractVars map[string]string `json:"extract_vars,omitempty"` // varName → JSONPath
 }
 
@@ -135,16 +135,16 @@ type StepResult struct {
 
 // Batch describes an import of many URLs/values to run against a template request.
 type Batch struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	SourcePath  string `json:"source_path"`  // path to the CSV or TXT file
-	SourceType  string `json:"source_type"`  // "csv" | "txt"
-	Delimiter   string `json:"delimiter"`    // CSV delimiter, default ","
-	Method      string `json:"method"`
-	URLTemplate string `json:"url_template"` // URL with {col0}/{colName}/{line} placeholders
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	SourcePath   string `json:"source_path"` // path to the CSV or TXT file
+	SourceType   string `json:"source_type"` // "csv" | "txt"
+	Delimiter    string `json:"delimiter"`   // CSV delimiter, default ","
+	Method       string `json:"method"`
+	URLTemplate  string `json:"url_template"` // URL with {col0}/{colName}/{line} placeholders
 	BodyTemplate string `json:"body_template,omitempty"`
-	Concurrency int    `json:"concurrency"` // how many requests to run at once
-	StopOnError bool   `json:"stop_on_error"`
+	Concurrency  int    `json:"concurrency"` // how many requests to run at once
+	StopOnError  bool   `json:"stop_on_error"`
 }
 
 // BatchResult holds the outcome of one row in a batch run.
@@ -190,7 +190,7 @@ type SidebarNode struct {
 type Panel int
 
 const (
-	PanelSidebar  Panel = iota
+	PanelSidebar Panel = iota
 	PanelBuilder
 	PanelResponse
 )
@@ -199,7 +199,7 @@ const (
 type BuilderTab int
 
 const (
-	BuilderTabRequest   BuilderTab = iota
+	BuilderTabRequest BuilderTab = iota
 	BuilderTabHeaders
 	BuilderTabVariables // local + global vars combined
 	BuilderTabTests

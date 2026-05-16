@@ -76,6 +76,7 @@ On first launch, config and data files are created automatically:
 | `E` | Open request body in `$EDITOR` |
 | `R` | Open response body in `$EDITOR` |
 | `o` | Open config file in `$EDITOR` |
+| `U` | Show updates, recent changes, and install history commits |
 | `N` | Add global variable |
 | `up` / `down` | Navigate lists |
 | `enter` | Confirm / enter edit mode |
@@ -83,6 +84,12 @@ On first launch, config and data files are created automatically:
 | `q` / `ctrl+c` | Quit |
 
 All keybindings can be remapped in `teapi.toml`.
+
+## Updates
+
+On launch, teapi checks the configured source checkout with `git fetch --prune --all`. If commits exist between the installed commit and the current branch's upstream, it prompts before updating.
+
+Updates run in a separate terminal and teapi exits before the installer starts. The updater uses your checkout's current branch/upstream, so forks and feature branches are preserved. Press `U` to review recent commits, expand commit descriptions, install latest, or install an older history commit.
 
 ---
 

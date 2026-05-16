@@ -49,10 +49,10 @@ type BuilderPanel struct {
 	headerCursor int
 
 	// Variables tab — local (per-request) + global (app-wide)
-	variables    []Variable // local vars for this request
-	globalVars   []Variable // global vars (from AppData.GlobalVars)
-	varCursor    int
-	varInGlobal  bool // true = cursor is in the global section
+	variables   []Variable // local vars for this request
+	globalVars  []Variable // global vars (from AppData.GlobalVars)
+	varCursor   int
+	varInGlobal bool // true = cursor is in the global section
 
 	// Tests tab
 	tests      []TestCase

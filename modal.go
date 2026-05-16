@@ -32,7 +32,7 @@ type ModalField struct {
 type ModalKind int
 
 const (
-	ModalAddHeader    ModalKind = iota
+	ModalAddHeader ModalKind = iota
 	ModalEditHeader
 	ModalAddVariable
 	ModalEditVariable
@@ -100,14 +100,14 @@ func NewModal(kind ModalKind, title string, fields []ModalField, width int, onCo
 	}
 
 	return Modal{
-		Kind:        kind,
-		Title:       title,
-		Fields:      inputs,
-		labels:      labels,
-		focused:     0,
-		Width:       width,
-		selectorAt:  -1, // no selector
-		onConfirm:   onConfirm,
+		Kind:       kind,
+		Title:      title,
+		Fields:     inputs,
+		labels:     labels,
+		focused:    0,
+		Width:      width,
+		selectorAt: -1, // no selector
+		onConfirm:  onConfirm,
 	}
 }
 

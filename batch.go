@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/list"
 	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
 )
 
 // ── Batch runner ──────────────────────────────────────────────────────────────
@@ -247,8 +247,10 @@ type BatchScreen struct {
 // batchItem implements list.Item for displaying a batch config.
 type batchItem struct{ b Batch }
 
-func (bi batchItem) Title() string       { return bi.b.Name }
-func (bi batchItem) Description() string { return fmt.Sprintf("%s • %s", bi.b.SourceType, bi.b.SourcePath) }
+func (bi batchItem) Title() string { return bi.b.Name }
+func (bi batchItem) Description() string {
+	return fmt.Sprintf("%s • %s", bi.b.SourceType, bi.b.SourcePath)
+}
 func (bi batchItem) FilterValue() string { return bi.b.Name }
 
 // NewBatchScreen creates a new batch screen.

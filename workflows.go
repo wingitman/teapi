@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/list"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
@@ -133,14 +133,14 @@ func runParallelSteps(steps []WorkflowStep, data AppData, chainedVars map[string
 // the user presses Ctrl+W.
 
 type WorkflowScreen struct {
-	workflows  []Workflow
-	list       list.Model  // list of workflows
-	stepList   list.Model  // list of steps in the selected workflow
-	results    []StepResult
-	running    bool
-	focusList  bool // true = workflow list focused, false = step list
-	width      int
-	height     int
+	workflows []Workflow
+	list      list.Model // list of workflows
+	stepList  list.Model // list of steps in the selected workflow
+	results   []StepResult
+	running   bool
+	focusList bool // true = workflow list focused, false = step list
+	width     int
+	height    int
 }
 
 // workflowItem implements list.Item for displaying a workflow in a list.
@@ -152,7 +152,7 @@ func (w workflowItem) FilterValue() string { return w.wf.Name }
 
 // stepItem implements list.Item for displaying a workflow step.
 type stepItem struct {
-	step  WorkflowStep
+	step    WorkflowStep
 	reqName string
 	result  *StepResult
 }

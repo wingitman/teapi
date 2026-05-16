@@ -48,6 +48,7 @@ type ConfigKeys struct {
 	OpenEditor   string `toml:"open_editor"`
 	OpenResponse string `toml:"open_response"`
 	OpenConfig   string `toml:"open_config"`
+	ShowUpdates  string `toml:"show_updates"`
 
 	// ── App-level ────────────────────────────────────────────────────────────
 	Quit string `toml:"quit"`
@@ -69,10 +70,19 @@ type ConfigUI struct {
 	Theme         string `toml:"theme"`
 }
 
+// ConfigUpdates holds update-check and installer preferences.
+type ConfigUpdates struct {
+	DisableChecks bool   `toml:"disable_checks"`
+	CurrentCommit string `toml:"current_commit"`
+	RepoPath      string `toml:"repo_path"`
+	Terminal      string `toml:"terminal"`
+}
+
 // Config is the top-level config struct.
 type Config struct {
-	Keys ConfigKeys `toml:"keys"`
-	UI   ConfigUI   `toml:"ui"`
+	Keys    ConfigKeys    `toml:"keys"`
+	UI      ConfigUI      `toml:"ui"`
+	Updates ConfigUpdates `toml:"updates"`
 }
 
 // defaultConfig returns the full set of defaults.
@@ -88,13 +98,14 @@ func defaultConfig() Config {
 			Space:        " ",
 			TabNext:      "tab",
 			TabPrev:      "shift+tab",
-		SendRequest:  "s",
-		NewItem:      "n",
-		DeleteItem:   "d",
-		CopyItem:     "y",
+			SendRequest:  "s",
+			NewItem:      "n",
+			DeleteItem:   "d",
+			CopyItem:     "y",
 			OpenEditor:   "E",
 			OpenResponse: "R",
 			OpenConfig:   "o",
+			ShowUpdates:  "U",
 			Quit:         "q",
 		},
 		UI: ConfigUI{
@@ -114,11 +125,15 @@ func defaultConfig() Config {
 //	macOS:   $HOME/Library/Application Support
 //	Windows: %AppData%\Roaming
 func configPath() string {
+	return filepath.Join(configDir(), "teapi.toml")
+}
+
+func configDir() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = os.Getenv("HOME")
 	}
-	return filepath.Join(dir, "delbysoft", "teapi.toml")
+	return filepath.Join(dir, "delbysoft")
 }
 
 // dataPath is also in data.go but referenced from config.go for migration
@@ -163,6 +178,22 @@ func SaveConfig(cfg Config) error {
 	return writeConfigFile(configPath(), cfg)
 }
 
+// RecordUpdateMetadata stores the installed commit and source repo path without
+// changing user-facing preferences.
+func RecordUpdateMetadata(commit, repoPath string) error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		cfg = defaultConfig()
+	}
+	if commit != "" {
+		cfg.Updates.CurrentCommit = commit
+	}
+	if repoPath != "" {
+		cfg.Updates.RepoPath = repoPath
+	}
+	return writeConfigFile(configPath(), cfg)
+}
+
 // configNeedsMigration returns true if the file is missing any key that
 // ships with this version of teapi.
 //
@@ -176,17 +207,32 @@ func configNeedsMigration(path string) bool {
 		return false
 	}
 	s := string(data)
-	t := reflect.TypeOf(ConfigKeys{})
-	for i := range t.NumField() {
-		tag := t.Field(i).Tag.Get("toml")
-		if tag == "" || strings.Contains(tag, "omitempty") {
-			continue
-		}
-		if !strings.Contains(s, tag+" =") {
+	for _, key := range tomlKeys(reflect.TypeOf(ConfigKeys{}), true) {
+		if !strings.Contains(s, key+" =") {
 			return true
 		}
 	}
+	for _, key := range tomlKeys(reflect.TypeOf(ConfigUpdates{}), false) {
+		if !strings.Contains(s, key+" =") {
+			return true
+		}
+	}
+	if !strings.Contains(s, "[updates]") {
+		return true
+	}
 	return false
+}
+
+func tomlKeys(t reflect.Type, skipOmitEmpty bool) []string {
+	keys := make([]string, 0, t.NumField())
+	for i := range t.NumField() {
+		tag := t.Field(i).Tag.Get("toml")
+		if tag == "" || (skipOmitEmpty && strings.Contains(tag, "omitempty")) {
+			continue
+		}
+		keys = append(keys, strings.Split(tag, ",")[0])
+	}
+	return keys
 }
 
 // writeConfigFile writes a fully-commented TOML file with the user's values
@@ -209,7 +255,14 @@ func writeConfigFile(path string, cfg Config) error {
 func buildConfigTOML(cfg Config) string {
 	k := cfg.Keys
 	ui := cfg.UI
+	u := cfg.Updates
 	q := func(s string) string { return `"` + s + `"` }
+	boolStr := func(v bool) string {
+		if v {
+			return "true"
+		}
+		return "false"
+	}
 	itoa := func(n int) string {
 		if n == 0 {
 			return "0"
@@ -252,6 +305,7 @@ func buildConfigTOML(cfg Config) string {
 		"open_editor   = " + q(k.OpenEditor) + "      # open request body in $EDITOR\n" +
 		"open_response = " + q(k.OpenResponse) + "      # open response body in $EDITOR (read-only)\n" +
 		"open_config   = " + q(k.OpenConfig) + "      # open this config file in $EDITOR\n" +
+		"show_updates  = " + q(k.ShowUpdates) + "      # show update history and installers\n" +
 		"\n" +
 		"# ── App-level ────────────────────────────────────────────────────────────\n" +
 		"quit         = " + q(k.Quit) + "       # quit teapi (Ctrl+C always works too)\n" +
@@ -259,7 +313,13 @@ func buildConfigTOML(cfg Config) string {
 		"[ui]\n" +
 		"sidebar_width  = " + itoa(ui.SidebarWidth) + "   # width of the sidebar in columns\n" +
 		"response_split = " + itoa(ui.ResponseSplit) + "  # % of right panel height for request builder\n" +
-		"theme          = " + q(ui.Theme) + "     # colour theme (currently only \"dark\" is supported)\n"
+		"theme          = " + q(ui.Theme) + "     # colour theme (currently only \"dark\" is supported)\n" +
+		"\n" +
+		"[updates]\n" +
+		"disable_checks = " + boolStr(u.DisableChecks) + "   # true disables startup update checks\n" +
+		"current_commit = " + q(u.CurrentCommit) + "   # installed app commit, maintained by teapi\n" +
+		"repo_path      = " + q(u.RepoPath) + "   # source checkout used for updates\n" +
+		"terminal       = " + q(u.Terminal) + "   # optional terminal command for detached updates\n"
 }
 
 // ── KeyMap ────────────────────────────────────────────────────────────────────
@@ -288,6 +348,7 @@ type KeyMap struct {
 	OpenEditor   key.Binding
 	OpenResponse key.Binding
 	OpenConfig   key.Binding
+	ShowUpdates  key.Binding
 
 	// App-level
 	Quit key.Binding
@@ -343,6 +404,7 @@ func NewKeyMap(cfg Config) KeyMap {
 		OpenEditor:   bindingFor(k.OpenEditor, "edit body"),
 		OpenResponse: bindingFor(k.OpenResponse, "view response"),
 		OpenConfig:   bindingFor(k.OpenConfig, "open config"),
+		ShowUpdates:  bindingFor(k.ShowUpdates, "updates"),
 		Quit:         bindingForWithExtra(k.Quit, "quit", "ctrl+c"),
 		Help:         key.NewBinding(), // unused
 	}
@@ -350,7 +412,7 @@ func NewKeyMap(cfg Config) KeyMap {
 
 // ShortHelp implements key.Map.
 func (k KeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.TabNext, k.TabPrev, k.SendRequest, k.Quit}
+	return []key.Binding{k.TabNext, k.TabPrev, k.SendRequest, k.ShowUpdates, k.Quit}
 }
 
 // FullHelp implements key.Map.
@@ -359,7 +421,7 @@ func (k KeyMap) FullHelp() [][]key.Binding {
 		{k.Up, k.Down, k.Left, k.Right},
 		{k.TabNext, k.TabPrev},
 		{k.SendRequest, k.NewItem, k.DeleteItem},
-		{k.OpenEditor, k.OpenResponse, k.OpenConfig},
+		{k.OpenEditor, k.OpenResponse, k.OpenConfig, k.ShowUpdates},
 		{k.Quit},
 	}
 }
